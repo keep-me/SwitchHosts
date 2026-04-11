@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Phase 0a minimal capability set for the main window. Expanded in Phase 0b alongside the capability/permission matrix deliverable.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
