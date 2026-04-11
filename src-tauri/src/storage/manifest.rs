@@ -177,10 +177,8 @@ fn node_children_mut(node: &mut Value) -> Option<&mut Vec<Value>> {
 }
 
 /// Walk the tree and collect the ids of every `local`/`remote` node
-/// reachable from the root. Used to garbage-collect orphaned
-/// `entries/<id>.hosts` files during Phase 2 but harmless to expose
-/// now.
-#[allow(dead_code)]
+/// reachable from the root. Used by the export command to know which
+/// `entries/<id>.hosts` files to inline into the backup JSON.
 pub fn collect_content_ids(nodes: &[Value], out: &mut Vec<String>) {
     for node in nodes {
         let kind = node.get("type").and_then(Value::as_str);

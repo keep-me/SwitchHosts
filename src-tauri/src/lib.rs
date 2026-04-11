@@ -1,4 +1,5 @@
 mod commands;
+mod import_export;
 mod migration;
 mod storage;
 
@@ -13,6 +14,7 @@ pub fn run() {
         .expect("failed to bootstrap SwitchHosts v5 storage layer");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         // Popup menu item clicks are routed back to the renderer as Tauri
         // events: the menu item id equals the renderer-generated

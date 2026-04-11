@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Phase 0a minimal capability set for the main window. Expanded in Phase 0b alongside the capability/permission matrix deliverable.",
+  "description": "Phase 1B capability set for the main window. Provides the Tauri core defaults and the dialog plugin for import/export file pickers. Will be split into per-window capability files (main/find/tray) in Phase 2.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default"]
 }

@@ -13,7 +13,9 @@
 use serde_json::{json, Value};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::{AppHandle, Emitter, Runtime, State, WebviewWindow};
+use tauri_plugin_dialog::DialogExt;
 
+use crate::import_export;
 use crate::storage::{
     entries, manifest::{self, Manifest},
     AppState, StorageError, Trashcan,
@@ -486,20 +488,115 @@ pub async fn show_item_in_folder(_args: Args) -> Value {
 }
 
 // ---- import / export -------------------------------------------------------
+//
+// All three commands preserve the Electron-era return shape so the
+// existing renderer error handling in TopBar/ConfigMenu and
+// TopBar/ImportFromUrl keeps working without changes:
+//
+//   exportData()            -> null (cancelled) | false (failed) | string (path)
+//   importData()            -> null (cancelled) | true (ok)       | string (error_code)
+//   importDataFromUrl(url)  -> null (error?)    | true (ok)       | string (error_code or msg)
+//
+// Hard filesystem / Tauri errors bubble up as Err(String) so the
+// invoke promise rejects; soft errors (parse failure, invalid shape)
+// come back as Ok(Value::String("error_code")) the renderer can
+// display.
 
 #[tauri::command]
-pub async fn export_data(_args: Args) -> Value {
-    Value::Null
+pub async fn export_data<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .set_file_name("swh_data.json")
+        .blocking_save_file();
+
+    let Some(dest) = picked else {
+        return Ok(Value::Null);
+    };
+
+    let dest_path = match dest.into_path() {
+        Ok(p) => p,
+        Err(e) => return Err(format!("invalid save path: {e}")),
+    };
+
+    let _guard = state.store_lock.lock().expect("store lock poisoned");
+    if let Err(e) = import_export::export_to_file(&dest_path, &state.paths) {
+        eprintln!("[v5 export] failed: {e}");
+        return Ok(Value::Bool(false));
+    }
+    Ok(Value::String(dest_path.display().to_string()))
 }
 
 #[tauri::command]
-pub async fn import_data(_args: Args) -> Value {
-    Value::Null
+pub async fn import_data<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file();
+
+    let Some(src) = picked else {
+        return Ok(Value::Null);
+    };
+
+    let src_path = match src.into_path() {
+        Ok(p) => p,
+        Err(e) => return Err(format!("invalid pick path: {e}")),
+    };
+
+    let bytes = match std::fs::read(&src_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("[v5 import] read failed: {e}");
+            return Ok(Value::String(import_export::ERR_PARSE.into()));
+        }
+    };
+
+    let _guard = state.store_lock.lock().expect("store lock poisoned");
+    match import_export::import_backup_bytes(&bytes, &state.paths) {
+        Ok(result) => Ok(result),
+        Err(e) => Err(format!("import failed: {e}")),
+    }
 }
 
 #[tauri::command]
-pub async fn import_data_from_url(_args: Args) -> Value {
-    Value::Null
+pub async fn import_data_from_url(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, String> {
+    let url = arg_str(&args, 0, "url").map_err(|e| format!("{e:?}"))?;
+
+    let body = match fetch_url(url).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("[v5 import-url] fetch failed: {e}");
+            return Ok(Value::String(e));
+        }
+    };
+
+    let _guard = state.store_lock.lock().expect("store lock poisoned");
+    match import_export::import_backup_bytes(body.as_bytes(), &state.paths) {
+        Ok(result) => Ok(result),
+        Err(e) => Err(format!("import failed: {e}")),
+    }
+}
+
+async fn fetch_url(url: &str) -> Result<String, String> {
+    let response = reqwest::get(url).await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("error_{}", status.as_u16()));
+    }
+    response.text().await.map_err(|e| e.to_string())
 }
 
 // ---- updater ---------------------------------------------------------------
