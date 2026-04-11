@@ -13,9 +13,39 @@
 use serde_json::{json, Value};
 use tauri::State;
 
-use crate::storage::{AppState, StorageError};
+use crate::storage::{
+    entries, manifest::{self, Manifest},
+    AppState, StorageError, Trashcan,
+};
 
 type Args = Vec<Value>;
+
+// ---- small helpers ---------------------------------------------------------
+
+fn load_manifest(state: &AppState) -> Result<Manifest, StorageError> {
+    Manifest::load(&state.paths.manifest_file)
+}
+
+fn save_manifest(state: &AppState, m: &Manifest) -> Result<(), StorageError> {
+    m.save(&state.paths.manifest_file)
+}
+
+fn load_trashcan(state: &AppState) -> Result<Trashcan, StorageError> {
+    Trashcan::load(&state.paths.trashcan_file)
+}
+
+fn save_trashcan(state: &AppState, t: &Trashcan) -> Result<(), StorageError> {
+    t.save(&state.paths.trashcan_file)
+}
+
+fn arg_str<'a>(args: &'a Args, index: usize, field: &'static str) -> Result<&'a str, StorageError> {
+    args.get(index)
+        .and_then(Value::as_str)
+        .ok_or_else(|| StorageError::InvalidConfigValue {
+            key: field.into(),
+            reason: format!("expected a string at args[{index}]"),
+        })
+}
 
 // ---- startup critical ------------------------------------------------------
 
@@ -25,12 +55,17 @@ pub async fn ping(_args: Args) -> Value {
 }
 
 #[tauri::command]
-pub async fn get_basic_data(_args: Args) -> Value {
-    json!({
-        "list": [],
-        "trashcan": [],
+pub async fn get_basic_data(
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, StorageError> {
+    let manifest = load_manifest(&state)?;
+    let trashcan = load_trashcan(&state)?;
+    Ok(json!({
+        "list": manifest.root,
+        "trashcan": trashcan.items,
         "version": [4, 3, 0, 6140],
-    })
+    }))
 }
 
 #[tauri::command]
@@ -106,79 +141,219 @@ pub async fn config_update(state: State<'_, AppState>, args: Args) -> Result<Val
 // ---- list / tree -----------------------------------------------------------
 
 #[tauri::command]
-pub async fn get_list(_args: Args) -> Value {
-    json!([])
+pub async fn get_list(state: State<'_, AppState>, _args: Args) -> Result<Value, StorageError> {
+    let m = load_manifest(&state)?;
+    Ok(Value::Array(m.root))
 }
 
 #[tauri::command]
-pub async fn get_item_from_list(_args: Args) -> Value {
-    Value::Null
+pub async fn get_item_from_list(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let id = arg_str(&args, 0, "id")?;
+    let m = load_manifest(&state)?;
+    Ok(manifest::find_node(&m.root, id).unwrap_or(Value::Null))
 }
 
 #[tauri::command]
 pub async fn get_content_of_list(_args: Args) -> Value {
+    // Content aggregation (group.include resolution + dedup + apply
+    // pipeline) lands with `hosts_apply` in Phase 2. Phase 1B keeps
+    // this inert so the renderer's apply button no-ops cleanly.
     json!("")
 }
 
 #[tauri::command]
-pub async fn set_list(_args: Args) -> Value {
-    Value::Null
+pub async fn set_list(state: State<'_, AppState>, args: Args) -> Result<Value, StorageError> {
+    let list = args.into_iter().next().unwrap_or(Value::Null);
+    let root = match list {
+        Value::Array(arr) => arr,
+        Value::Null => Vec::new(),
+        _ => {
+            return Err(StorageError::InvalidConfigValue {
+                key: "set_list.args[0]".into(),
+                reason: "expected an array of host nodes".into(),
+            });
+        }
+    };
+    let _guard = state.store_lock.lock().expect("store lock poisoned");
+    let mut m = load_manifest(&state).unwrap_or_default();
+    m.root = root;
+    save_manifest(&state, &m)?;
+    Ok(Value::Null)
 }
 
 #[tauri::command]
-pub async fn move_to_trashcan(_args: Args) -> Value {
-    Value::Null
+pub async fn move_to_trashcan(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let id = arg_str(&args, 0, "id")?.to_string();
+    let _guard = state.store_lock.lock().expect("store lock poisoned");
+    move_ids_to_trashcan(&state, &[id])?;
+    Ok(Value::Null)
 }
 
 #[tauri::command]
-pub async fn move_many_to_trashcan(_args: Args) -> Value {
-    Value::Null
+pub async fn move_many_to_trashcan(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let ids_value = args.into_iter().next().unwrap_or(Value::Null);
+    let ids: Vec<String> = match ids_value {
+        Value::Array(arr) => arr
+            .into_iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        _ => {
+            return Err(StorageError::InvalidConfigValue {
+                key: "move_many_to_trashcan.args[0]".into(),
+                reason: "expected an array of ids".into(),
+            });
+        }
+    };
+    let _guard = state.store_lock.lock().expect("store lock poisoned");
+    move_ids_to_trashcan(&state, &ids)?;
+    Ok(Value::Null)
+}
+
+fn move_ids_to_trashcan(state: &AppState, ids: &[String]) -> Result<(), StorageError> {
+    let mut m = load_manifest(state).unwrap_or_default();
+    let mut t = load_trashcan(state).unwrap_or_default();
+    for id in ids {
+        if let Some((node, parent_id)) = manifest::remove_node(&mut m.root, id) {
+            t.add_item(node, parent_id);
+        }
+    }
+    save_manifest(state, &m)?;
+    save_trashcan(state, &t)?;
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn get_trashcan_list(_args: Args) -> Value {
-    json!([])
+pub async fn get_trashcan_list(
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, StorageError> {
+    let t = load_trashcan(&state)?;
+    Ok(Value::Array(t.items))
 }
 
 #[tauri::command]
-pub async fn clear_trashcan(_args: Args) -> Value {
-    Value::Null
+pub async fn clear_trashcan(
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, StorageError> {
+    let _guard = state.store_lock.lock().expect("store lock poisoned");
+    let mut t = load_trashcan(&state).unwrap_or_default();
+    t.items.clear();
+    save_trashcan(&state, &t)?;
+    // Note: we deliberately do NOT delete orphaned entries/*.hosts
+    // files here. Garbage collection of orphan content files lands
+    // alongside the "permanent delete" flow in Phase 2.
+    Ok(Value::Null)
 }
 
 #[tauri::command]
-pub async fn delete_item_from_trashcan(_args: Args) -> Value {
-    json!(true)
+pub async fn delete_item_from_trashcan(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let id = arg_str(&args, 0, "id")?.to_string();
+    let _guard = state.store_lock.lock().expect("store lock poisoned");
+    let mut t = load_trashcan(&state).unwrap_or_default();
+    let removed = t.remove_item(&id).is_some();
+    save_trashcan(&state, &t)?;
+    Ok(json!(removed))
 }
 
 #[tauri::command]
-pub async fn restore_item_from_trashcan(_args: Args) -> Value {
-    json!(true)
+pub async fn restore_item_from_trashcan(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let id = arg_str(&args, 0, "id")?.to_string();
+    let _guard = state.store_lock.lock().expect("store lock poisoned");
+    let mut t = load_trashcan(&state).unwrap_or_default();
+    let item = match t.remove_item(&id) {
+        Some(item) => item,
+        None => return Ok(json!(false)),
+    };
+
+    let parent_id = item
+        .get("parent_id")
+        .and_then(Value::as_str)
+        .map(String::from);
+    let node = item.get("data").cloned().unwrap_or(Value::Null);
+    if node.is_null() {
+        // Trashcan entry was malformed — save the (now-shorter)
+        // trashcan and report failure so the UI shows an error.
+        save_trashcan(&state, &t)?;
+        return Ok(json!(false));
+    }
+
+    let mut m = load_manifest(&state).unwrap_or_default();
+    manifest::insert_node(&mut m.root, node, parent_id.as_deref());
+    save_manifest(&state, &m)?;
+    save_trashcan(&state, &t)?;
+    Ok(json!(true))
 }
 
 // ---- hosts content ---------------------------------------------------------
 
 #[tauri::command]
-pub async fn get_hosts_content(_args: Args) -> Value {
-    json!("")
+pub async fn get_hosts_content(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let id = arg_str(&args, 0, "id")?;
+    let content = entries::read_entry(&state.paths.entries_dir, id)?;
+    Ok(json!(content))
 }
 
 #[tauri::command]
-pub async fn set_hosts_content(_args: Args) -> Value {
-    Value::Null
+pub async fn set_hosts_content(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let id = arg_str(&args, 0, "id")?.to_string();
+    let content = args
+        .get(1)
+        .and_then(Value::as_str)
+        .ok_or_else(|| StorageError::InvalidConfigValue {
+            key: "set_hosts_content.args[1]".into(),
+            reason: "expected a string content at args[1]".into(),
+        })?
+        .to_string();
+    entries::write_entry(&state.paths.entries_dir, &id, &content)?;
+    Ok(Value::Null)
 }
 
 #[tauri::command]
-pub async fn get_system_hosts(_args: Args) -> Value {
-    json!("")
+pub async fn get_system_hosts(_args: Args) -> Result<Value, StorageError> {
+    let path = system_hosts_path();
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(json!(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!("")),
+        Err(e) => Err(StorageError::io(path.to_string(), e)),
+    }
 }
 
 #[tauri::command]
 pub async fn get_path_of_system_hosts(_args: Args) -> Value {
+    json!(system_hosts_path())
+}
+
+fn system_hosts_path() -> &'static str {
     #[cfg(target_os = "windows")]
-    let path = r"C:\Windows\System32\drivers\etc\hosts";
+    {
+        r"C:\Windows\System32\drivers\etc\hosts"
+    }
     #[cfg(not(target_os = "windows"))]
-    let path = "/etc/hosts";
-    json!(path)
+    {
+        "/etc/hosts"
+    }
 }
 
 // ---- apply / refresh -------------------------------------------------------

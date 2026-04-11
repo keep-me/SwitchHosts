@@ -6,11 +6,12 @@
 //! `format` / `schemaVersion` envelope metadata is injected at the I/O
 //! boundary and stripped on the way out.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::atomic::atomic_write;
 use super::error::StorageError;
 
 pub const CONFIG_FORMAT: &str = "switchhosts-config";
@@ -139,16 +140,7 @@ impl AppConfig {
             StorageError::serialize(path.display().to_string(), e)
         })?;
 
-        let tmp_path = tmp_sibling(path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| StorageError::io(parent.display().to_string(), e))?;
-        }
-        std::fs::write(&tmp_path, &json)
-            .map_err(|e| StorageError::io(tmp_path.display().to_string(), e))?;
-        std::fs::rename(&tmp_path, path)
-            .map_err(|e| StorageError::io(path.display().to_string(), e))?;
-        Ok(())
+        atomic_write(path, &json)
     }
 
     /// Return the flat `Value` view the front-end adapter expects from
@@ -202,11 +194,3 @@ impl AppConfig {
     }
 }
 
-fn tmp_sibling(path: &Path) -> PathBuf {
-    let mut file_name = path
-        .file_name()
-        .map(|f| f.to_os_string())
-        .unwrap_or_default();
-    file_name.push(".tmp");
-    path.with_file_name(file_name)
-}
