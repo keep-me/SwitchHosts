@@ -1,8 +1,15 @@
 mod commands;
+mod storage;
+
+use storage::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let state = AppState::bootstrap()
+        .expect("failed to bootstrap SwitchHosts v5 storage layer");
+
     tauri::Builder::default()
+        .manage(state)
         .setup(|_app| Ok(()))
         .invoke_handler(tauri::generate_handler![
             // startup critical

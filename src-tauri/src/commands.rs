@@ -1,15 +1,19 @@
-//! Phase 1A command stubs.
+//! Tauri commands.
 //!
-//! Every command the renderer may call is registered here as a `#[tauri::command]`
-//! returning an empty / fixture JSON value. This is enough to unblock the first
-//! render of the main window. Phase 1B will replace the stubs with real domain
-//! services that read/write `~/.SwitchHosts`.
+//! Phase 1A stubs landed everything as `_args: Vec<serde_json::Value>`
+//! returning fixtures. Phase 1B steps progressively replace stubs with
+//! real implementations backed by the `storage` module.
 //!
-//! Convention: each command accepts `args: Vec<serde_json::Value>` to match the
-//! positional-argument marshalling that the front-end adapter layer
-//! (`src/renderer/core/agent.ts`) uses. Commands ignore `args` for now.
+//! Convention: every command accepts `args: Vec<serde_json::Value>` to
+//! match the positional-argument marshalling the front-end adapter uses
+//! (`src/renderer/core/agent.ts` sends `invoke(cmd, { args: params })`).
+//! Commands also take a `State<'_, AppState>` when they need shared
+//! storage access.
 
 use serde_json::{json, Value};
+use tauri::State;
+
+use crate::storage::{AppState, StorageError};
 
 type Args = Vec<Value>;
 
@@ -44,49 +48,59 @@ pub async fn dark_mode_toggle(_args: Args) -> Value {
 // ---- config ----------------------------------------------------------------
 
 #[tauri::command]
-pub async fn config_all(_args: Args) -> Value {
-    // Must match ConfigsType in src/common/default_configs.ts.
-    json!({
-        "left_panel_show": true,
-        "left_panel_width": 270,
-        "use_system_window_frame": false,
-        "write_mode": "append",
-        "history_limit": 50,
-        "locale": null,
-        "theme": "light",
-        "choice_mode": 2,
-        "show_title_on_tray": false,
-        "hide_at_launch": false,
-        "send_usage_data": false,
-        "cmd_after_hosts_apply": "",
-        "remove_duplicate_records": false,
-        "hide_dock_icon": false,
-        "use_proxy": false,
-        "proxy_protocol": "http",
-        "proxy_host": "",
-        "proxy_port": 0,
-        "http_api_on": false,
-        "http_api_only_local": true,
-        "tray_mini_window": true,
-        "multi_chose_folder_switch_all": false,
-        "auto_download_update": true,
-        "env": "PROD",
-    })
+pub async fn config_all(state: State<'_, AppState>, _args: Args) -> Result<Value, StorageError> {
+    let cfg = state.config.lock().expect("config mutex poisoned");
+    Ok(cfg.to_flat_value())
 }
 
 #[tauri::command]
-pub async fn config_get(_args: Args) -> Value {
-    Value::Null
+pub async fn config_get(state: State<'_, AppState>, args: Args) -> Result<Value, StorageError> {
+    let key = args
+        .first()
+        .and_then(Value::as_str)
+        .ok_or_else(|| StorageError::InvalidConfigValue {
+            key: "<arg0>".into(),
+            reason: "config_get requires a string key as the first argument".into(),
+        })?;
+    let cfg = state.config.lock().expect("config mutex poisoned");
+    Ok(cfg.get_key(key).unwrap_or(Value::Null))
 }
 
 #[tauri::command]
-pub async fn config_set(_args: Args) -> Value {
-    Value::Null
+pub async fn config_set(state: State<'_, AppState>, args: Args) -> Result<Value, StorageError> {
+    let key = args
+        .first()
+        .and_then(Value::as_str)
+        .ok_or_else(|| StorageError::InvalidConfigValue {
+            key: "<arg0>".into(),
+            reason: "config_set requires a string key as the first argument".into(),
+        })?
+        .to_string();
+    let value = args.get(1).cloned().unwrap_or(Value::Null);
+
+    {
+        let mut cfg = state.config.lock().expect("config mutex poisoned");
+        cfg.set_key(&key, value)?;
+    }
+    state.persist_config()?;
+    Ok(Value::Null)
 }
 
 #[tauri::command]
-pub async fn config_update(_args: Args) -> Value {
-    Value::Null
+pub async fn config_update(state: State<'_, AppState>, args: Args) -> Result<Value, StorageError> {
+    let patch = args.first().cloned().unwrap_or(Value::Null);
+    if patch.is_null() {
+        return Err(StorageError::InvalidConfigValue {
+            key: "<arg0>".into(),
+            reason: "config_update requires a partial object as the first argument".into(),
+        });
+    }
+    {
+        let mut cfg = state.config.lock().expect("config mutex poisoned");
+        cfg.apply_partial(&patch)?;
+    }
+    state.persist_config()?;
+    Ok(Value::Null)
 }
 
 // ---- list / tree -----------------------------------------------------------
@@ -327,10 +341,6 @@ pub async fn install_update(_args: Args) -> Value {
 // ---- data dir --------------------------------------------------------------
 
 #[tauri::command]
-pub async fn get_data_dir(_args: Args) -> Value {
-    // Phase 1B will compute ~/.SwitchHosts here.
-    let path = std::env::var("HOME")
-        .map(|h| format!("{}/.SwitchHosts", h))
-        .unwrap_or_else(|_| "~/.SwitchHosts".to_string());
-    json!(path)
+pub async fn get_data_dir(state: State<'_, AppState>, _args: Args) -> Result<Value, StorageError> {
+    Ok(json!(state.paths.root.display().to_string()))
 }
