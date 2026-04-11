@@ -426,9 +426,13 @@ pub async fn apply_hosts_selection<R: Runtime>(
         }
     };
 
-    let (write_mode, history_limit) = {
+    let (write_mode, history_limit, cmd_after_apply) = {
         let cfg = state.config.lock().expect("config mutex poisoned");
-        (cfg.write_mode.clone(), cfg.history_limit as i32)
+        (
+            cfg.write_mode.clone(),
+            cfg.history_limit as i32,
+            cfg.cmd_after_hosts_apply.clone(),
+        )
     };
 
     // The privileged write is potentially long-running (waits for the
@@ -487,6 +491,27 @@ pub async fn apply_hosts_selection<R: Runtime>(
     // selection display. Wrapped in the standard `_args` envelope.
     let _ = app.emit("system_hosts_updated", json!({ "_args": [] }));
 
+    // Run `cmd_after_hosts_apply` (if configured) as the current user
+    // — never elevated. We deliberately await it inside this command
+    // so the renderer's existing `await actions.setSystemHosts(...)`
+    // call site can show "running" state without changes; the 30s
+    // timeout in the runner caps the wait. The result is appended to
+    // its own journal and broadcast as `cmd_run_result`.
+    if let Some(result) = hosts_apply::cmd_runner::run(&cmd_after_apply).await {
+        let cmd_history_path = state.paths.histories_dir.join("cmd-after-apply.json");
+        if let Err(e) = hosts_apply::cmd_runner::insert(&cmd_history_path, result.clone()) {
+            eprintln!("[v5 cmd-after-apply] failed to persist history: {e}");
+        }
+        match serde_json::to_value(&result) {
+            Ok(payload) => {
+                let _ = app.emit("cmd_run_result", json!({ "_args": [payload] }));
+            }
+            Err(e) => {
+                eprintln!("[v5 cmd-after-apply] failed to serialise result: {e}");
+            }
+        }
+    }
+
     Ok(json!({
         "success": true,
         "old_content": outcome.previous_content,
@@ -536,18 +561,37 @@ pub async fn delete_apply_history_item(
 // ---- cmd_after_hosts_apply history -----------------------------------------
 
 #[tauri::command]
-pub async fn cmd_get_history_list(_args: Args) -> Value {
-    json!([])
+pub async fn cmd_get_history_list(
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, StorageError> {
+    let path = state.paths.histories_dir.join("cmd-after-apply.json");
+    let items = hosts_apply::cmd_runner::load(&path)?;
+    let value = serde_json::to_value(items).map_err(|e| {
+        StorageError::serialize(path.display().to_string(), e)
+    })?;
+    Ok(value)
 }
 
 #[tauri::command]
-pub async fn cmd_delete_history_item(_args: Args) -> Value {
-    Value::Null
+pub async fn cmd_delete_history_item(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let id = arg_str(&args, 0, "id")?;
+    let path = state.paths.histories_dir.join("cmd-after-apply.json");
+    let removed = hosts_apply::cmd_runner::delete_by_id(&path, id)?;
+    Ok(json!(removed))
 }
 
 #[tauri::command]
-pub async fn cmd_clear_history(_args: Args) -> Value {
-    Value::Null
+pub async fn cmd_clear_history(
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, StorageError> {
+    let path = state.paths.histories_dir.join("cmd-after-apply.json");
+    hosts_apply::cmd_runner::clear(&path)?;
+    Ok(Value::Null)
 }
 
 // ---- find window -----------------------------------------------------------

@@ -14,6 +14,7 @@
 //!   load / save / insert (trimmed by `history_limit`) / delete by id.
 
 pub mod aggregate;
+pub mod cmd_runner;
 pub mod elevation;
 pub mod error;
 pub mod history;
