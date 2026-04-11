@@ -12,6 +12,7 @@ import ItemIcon from '@renderer/components/ItemIcon'
 import SwitchButton from '@renderer/components/SwitchButton'
 import { actions, agent } from '@renderer/core/agent'
 import { PopupMenu } from '@renderer/core/PopupMenu'
+import useOnBroadcast from '@renderer/core/useOnBroadcast'
 import useHostsData from '@renderer/models/useHostsData'
 import useI18n from '@renderer/models/useI18n'
 import { IconEdit } from '@tabler/icons-react'
@@ -39,6 +40,24 @@ const ListItem = (props: Props) => {
   useEffect(() => {
     setIsOn(data.on)
   }, [data])
+
+  // Roll-back signal from List/index.tsx::onToggleItem. The optimistic
+  // toggle in `toggleOn` flips `is_on` locally before the apply round
+  // trip starts. When the apply fails (e.g. user dismissed the OS auth
+  // prompt), `loadHostsData` reloads manifest.json — but if the apply
+  // never persisted, the reloaded `data.on` matches the previous value
+  // and Tree/Node's deep-equal `React.memo` skips re-rendering, so the
+  // useEffect above never re-fires. Subscribing here gives us an
+  // explicit rollback path that bypasses the memo.
+  useOnBroadcast(
+    events.set_hosts_on_status,
+    (id: string, on: boolean) => {
+      if (id === data.id) {
+        setIsOn(on)
+      }
+    },
+    [data.id],
+  )
 
   useEffect(() => {
     const is_selected = data.id === current_hosts?.id

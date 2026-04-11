@@ -10,20 +10,30 @@
 //! Commands also take a `State<'_, AppState>` when they need shared
 //! storage access.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::hosts_apply;
+use crate::hosts_apply::{self, ApplyHistoryItem, HostsApplyError};
 use crate::import_export;
 use crate::lifecycle::{self, MAIN_WINDOW_LABEL};
 use crate::storage::{
     entries, manifest::{self, Manifest},
     AppState, StorageError, Trashcan,
 };
+
+/// Per-process counter so apply-history ids generated within the
+/// same nanosecond are still unique. Cheap, opaque, never compared
+/// across machines or runs — adequate for journal entries.
+static APPLY_HISTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn make_history_id(now_ms: i64) -> String {
+    let seq = APPLY_HISTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("apply_{now_ms}_{seq}")
+}
 
 type Args = Vec<Value>;
 
@@ -397,28 +407,91 @@ fn system_hosts_path() -> &'static str {
 // ---- apply / refresh -------------------------------------------------------
 
 #[tauri::command]
-pub async fn apply_hosts_selection(args: Args) -> Value {
-    // P2.E.1 leaves the privileged write for P2.E.2; for now we just
-    // log what the renderer handed us so the aggregation pipeline can
-    // be smoke-tested without touching /etc/hosts.
-    let content_len = args
-        .first()
-        .and_then(Value::as_str)
-        .map(|s| s.len())
-        .unwrap_or(0);
-    let preview: String = args
-        .first()
-        .and_then(Value::as_str)
-        .map(|s| s.chars().take(200).collect())
-        .unwrap_or_default();
-    // NOTE: using eprintln! instead of log::info! because the crate
-    // doesn't yet initialise a logger backend — every log::* call is
-    // silently dropped today. Tracked as a debt; see implementation
-    // notes D-log.
-    eprintln!(
-        "[v5 P2.E.1] apply_hosts_selection [stub]: content len={content_len}, preview={preview:?}"
-    );
-    json!({ "success": true, "message": "[v5 stub]" })
+pub async fn apply_hosts_selection<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, String> {
+    // args[0] = content (string, already aggregated by get_content_of_list)
+    // args[1] = options ({ sudo_pswd? }) — ignored under v5/Tauri because
+    //          OS-native elevation handles credentials.
+    let content = match args.first().and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => {
+            return Ok(json!({
+                "success": false,
+                "code": "fail",
+                "message": "apply_hosts_selection: args[0] must be a string",
+            }));
+        }
+    };
+
+    let (write_mode, history_limit) = {
+        let cfg = state.config.lock().expect("config mutex poisoned");
+        (cfg.write_mode.clone(), cfg.history_limit as i32)
+    };
+
+    // The privileged write is potentially long-running (waits for the
+    // user at the OS auth prompt) and *must not* hold the store_lock —
+    // see implementation-notes A5. We do all the work outside the lock
+    // and only retake it for the history journal write below.
+    let outcome = match hosts_apply::apply_to_system_hosts(&content, &write_mode) {
+        Ok(o) => o,
+        Err(HostsApplyError::Cancelled) => {
+            return Ok(HostsApplyError::Cancelled.into_renderer_value());
+        }
+        Err(e) => {
+            eprintln!("[v5 apply] {e}");
+            return Ok(e.into_renderer_value());
+        }
+    };
+
+    // Persist apply history (mirrors Electron behaviour: insert
+    // previous content first if it differs from the last entry, then
+    // insert the new content). Skip the journal updates entirely when
+    // the file was already up-to-date — we don't want a noop apply
+    // to spam the history.
+    if !outcome.unchanged {
+        let history_path = state.paths.histories_dir.join("system-hosts.json");
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        // Step 1: previous content, only if not redundant.
+        let existing = hosts_apply::history::load(&history_path).unwrap_or_default();
+        let last_content = existing.last().map(|i| i.content.as_str());
+        if last_content != Some(outcome.previous_content.as_str()) {
+            let item = ApplyHistoryItem {
+                id: make_history_id(now_ms),
+                content: outcome.previous_content.clone(),
+                add_time_ms: now_ms,
+                label: None,
+            };
+            if let Err(e) = hosts_apply::history::insert(&history_path, item, history_limit) {
+                eprintln!("[v5 apply] failed to write previous content history: {e}");
+            }
+        }
+
+        // Step 2: new content.
+        let new_item = ApplyHistoryItem {
+            id: make_history_id(now_ms),
+            content: outcome.new_content.clone(),
+            add_time_ms: now_ms,
+            label: None,
+        };
+        if let Err(e) = hosts_apply::history::insert(&history_path, new_item, history_limit) {
+            eprintln!("[v5 apply] failed to write new content history: {e}");
+        }
+    }
+
+    // Notify any listening windows that the system file has changed.
+    // Editor.HostsEditor refreshes the system view; tray refreshes its
+    // selection display. Wrapped in the standard `_args` envelope.
+    let _ = app.emit("system_hosts_updated", json!({ "_args": [] }));
+
+    Ok(json!({
+        "success": true,
+        "old_content": outcome.previous_content,
+        "new_content": outcome.new_content,
+    }))
 }
 
 #[tauri::command]
@@ -437,13 +510,27 @@ pub async fn refresh_all_remote_hosts(_args: Args) -> Value {
 }
 
 #[tauri::command]
-pub async fn get_apply_history(_args: Args) -> Value {
-    json!([])
+pub async fn get_apply_history(
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, StorageError> {
+    let path = state.paths.histories_dir.join("system-hosts.json");
+    let items = hosts_apply::history::load(&path)?;
+    let value = serde_json::to_value(items).map_err(|e| {
+        StorageError::serialize(path.display().to_string(), e)
+    })?;
+    Ok(value)
 }
 
 #[tauri::command]
-pub async fn delete_apply_history_item(_args: Args) -> Value {
-    Value::Null
+pub async fn delete_apply_history_item(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let id = arg_str(&args, 0, "id")?;
+    let path = state.paths.histories_dir.join("system-hosts.json");
+    let removed = hosts_apply::history::delete_by_id(&path, id)?;
+    Ok(json!(removed))
 }
 
 // ---- cmd_after_hosts_apply history -----------------------------------------
