@@ -23,7 +23,9 @@
 | Phase 1B step 3 — PotDb 迁移 | ✅ | `86de7df` |
 | Phase 1B step 4 — 手动 import/export | ✅ | `061dbc8` |
 | Phase 1B v5 manifest 格式重构 | ✅ | `5a7eeeb` |
-| Phase 2 — 桌面能力 + HTTP API | ⏳ | 见 [phase2-plan.md](/Users/wu/studio/SwitchHosts/v5plan/switchhosts-v5-phase2-plan.md) |
+| Phase 2.A — 主窗口生命周期 | ✅ | (含位置持久化、Reopen、单实例) |
+| Phase 2.E.1 — hosts 内容聚合 + 预览命令 | ✅ | (本子步骤) |
+| Phase 2 — 其余子步骤 | ⏳ | 见 [phase2-plan.md](/Users/wu/studio/SwitchHosts/v5plan/switchhosts-v5-phase2-plan.md) |
 | Phase 3 — updater + 发布链 | ⏳ | 未开始 |
 | Cutover | ⏳ | 未开始 |
 
@@ -231,6 +233,16 @@ Phase 1B step 4 的 URL 导入直接 `reqwest::get(url)`，没读取 `use_proxy`
 ### D9. tracer / `send_usage_data` 是 no-op
 
 Electron 版的 tracer 当前也是注释掉的 no-op（参见 [src/main/libs/tracer.ts](/Users/wu/studio/SwitchHosts/src/main/libs/tracer.ts)）。v5 配置项保留但 Rust 侧没有任何实现。**有意识的不做**，未来如果重启上报功能再加。
+
+### D11. 缺少 logger 后端 — 所有 `log::*` 调用被静默丢弃
+
+`Cargo.toml` 只引入了 `log` facade，没有任何后端（`env_logger`、`tauri-plugin-log`、`fern` 等）。结果：[lifecycle.rs](/Users/wu/studio/SwitchHosts/src-tauri/src/lifecycle.rs)、[storage/mod.rs](/Users/wu/studio/SwitchHosts/src-tauri/src/storage/mod.rs)、[migration/mod.rs](/Users/wu/studio/SwitchHosts/src-tauri/src/migration/mod.rs) 等处的 `log::info!` / `log::warn!` 全部被无声丢弃。Phase 2.E.1 烟雾测试时踩到这个坑，临时改用了 `eprintln!`。
+
+**修复方向**（P2.I 或更早）：
+
+- 引入 [`tauri-plugin-log`](https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/log)，在 `lib.rs::run` 的 Builder 链里 `.plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Info).build())`
+- 修复后把 P2.E.1 stub 里的 `eprintln!` 换回 `log::info!`
+- 同时支持文件日志输出，便于 P3 发布后远程问题排查
 
 ### D10. macOS / Linux / Windows 跨平台验收只在 macOS 上做
 

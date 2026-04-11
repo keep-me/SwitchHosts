@@ -17,6 +17,7 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::hosts_apply;
 use crate::import_export;
 use crate::lifecycle::{self, MAIN_WINDOW_LABEL};
 use crate::storage::{
@@ -168,11 +169,37 @@ pub async fn get_item_from_list(
 }
 
 #[tauri::command]
-pub async fn get_content_of_list(_args: Args) -> Value {
-    // Content aggregation (group.include resolution + dedup + apply
-    // pipeline) lands with `hosts_apply` in Phase 2. Phase 1B keeps
-    // this inert so the renderer's apply button no-ops cleanly.
-    json!("")
+pub async fn get_content_of_list(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    // The renderer hands us its current in-memory list as args[0]; we
+    // intentionally do NOT re-read manifest.json here. The Apply button
+    // is supposed to write whatever the user is looking at, including
+    // edits that haven't yet been persisted via set_list.
+    let list_value = args.into_iter().next().unwrap_or(Value::Null);
+    let list: Vec<Value> = match list_value {
+        Value::Array(arr) => arr,
+        Value::Null => Vec::new(),
+        _ => {
+            return Err(StorageError::InvalidConfigValue {
+                key: "get_content_of_list.args[0]".into(),
+                reason: "expected an array of host nodes".into(),
+            });
+        }
+    };
+
+    let remove_duplicate = {
+        let cfg = state.config.lock().expect("config mutex poisoned");
+        cfg.remove_duplicate_records
+    };
+
+    let content = hosts_apply::aggregate_selected_content(
+        &list,
+        &state.paths,
+        remove_duplicate,
+    )?;
+    Ok(json!(content))
 }
 
 #[tauri::command]
@@ -370,7 +397,27 @@ fn system_hosts_path() -> &'static str {
 // ---- apply / refresh -------------------------------------------------------
 
 #[tauri::command]
-pub async fn apply_hosts_selection(_args: Args) -> Value {
+pub async fn apply_hosts_selection(args: Args) -> Value {
+    // P2.E.1 leaves the privileged write for P2.E.2; for now we just
+    // log what the renderer handed us so the aggregation pipeline can
+    // be smoke-tested without touching /etc/hosts.
+    let content_len = args
+        .first()
+        .and_then(Value::as_str)
+        .map(|s| s.len())
+        .unwrap_or(0);
+    let preview: String = args
+        .first()
+        .and_then(Value::as_str)
+        .map(|s| s.chars().take(200).collect())
+        .unwrap_or_default();
+    // NOTE: using eprintln! instead of log::info! because the crate
+    // doesn't yet initialise a logger backend — every log::* call is
+    // silently dropped today. Tracked as a debt; see implementation
+    // notes D-log.
+    eprintln!(
+        "[v5 P2.E.1] apply_hosts_selection [stub]: content len={content_len}, preview={preview:?}"
+    );
     json!({ "success": true, "message": "[v5 stub]" })
 }
 

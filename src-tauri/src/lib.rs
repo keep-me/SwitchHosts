@@ -1,4 +1,5 @@
 mod commands;
+mod hosts_apply;
 mod import_export;
 mod lifecycle;
 mod migration;
