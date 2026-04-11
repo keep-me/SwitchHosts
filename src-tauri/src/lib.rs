@@ -1,4 +1,5 @@
 mod commands;
+mod migration;
 mod storage;
 
 use serde_json::json;

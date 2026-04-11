@@ -71,7 +71,12 @@ pub async fn get_basic_data(
 
 #[tauri::command]
 pub async fn migration_status(_args: Args) -> Value {
-    // Phase 1A has no real PotDb migration yet; report "no migration needed".
+    // In v5, PotDb → v5 migration runs once inside `AppState::bootstrap`
+    // before the renderer is ever served. By the time this command is
+    // reachable from the renderer, migration has already been attempted
+    // (and either applied or skipped). Returning `false` tells the old
+    // Electron-era `actions.migrateCheck()` caller in index.tsx that it
+    // should not prompt the user — which is what we want in v5.
     json!(false)
 }
 

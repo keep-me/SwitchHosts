@@ -36,11 +36,17 @@ impl AppState {
     ///
     /// 1. Resolve the default v5 paths (`~/.SwitchHosts`).
     /// 2. Ensure all v5 directories exist.
-    /// 3. Load `internal/config.json` into memory, or fall back to
+    /// 3. Run the one-shot PotDb → v5 migration if `manifest.json` is
+    ///    missing and legacy data is present.
+    /// 4. Load `internal/config.json` into memory, or fall back to
     ///    defaults if the file is missing / corrupt.
     pub fn bootstrap() -> Result<Self, StorageError> {
         let paths = V5Paths::resolve_default()?;
         paths.ensure_dirs()?;
+
+        let outcome = crate::migration::run_if_needed(&paths)?;
+        log::info!("migration outcome: {outcome:?}");
+
         let config = AppConfig::load(&paths.config_file);
         Ok(Self {
             paths,
