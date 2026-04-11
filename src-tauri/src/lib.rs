@@ -1,10 +1,11 @@
 mod commands;
 mod import_export;
+mod lifecycle;
 mod migration;
 mod storage;
 
 use serde_json::json;
-use tauri::Emitter;
+use tauri::{Emitter, Manager, RunEvent};
 
 use storage::AppState;
 
@@ -13,7 +14,12 @@ pub fn run() {
     let state = AppState::bootstrap()
         .expect("failed to bootstrap SwitchHosts v5 storage layer");
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        // Single-instance MUST be the first plugin so a second
+        // launch is intercepted before any other plugin starts up.
+        .plugin(tauri_plugin_single_instance::init(
+            |app, args, cwd| lifecycle::focus_main_on_second_instance(app, args, cwd),
+        ))
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         // Popup menu item clicks are routed back to the renderer as Tauri
@@ -27,7 +33,37 @@ pub fn run() {
                 let _ = app.emit(id, json!({ "_args": [] }));
             }
         })
-        .setup(|_app| Ok(()))
+        .setup(|app| {
+            let main = app
+                .get_webview_window(lifecycle::MAIN_WINDOW_LABEL)
+                .expect("main window declared in tauri.conf.json");
+
+            // Install the close-button-hides handler before any
+            // restore work so an early close still does the right
+            // thing.
+            lifecycle::install_main_close_handler(&main);
+
+            // Restore main window geometry from internal/state.json
+            // (or center on first launch) and reveal the window. The
+            // window starts as visible:false in tauri.conf.json so
+            // there is no flicker between the default position and
+            // the restored position.
+            let app_state = app.state::<AppState>();
+            lifecycle::restore_and_show_main(&main, app_state.inner());
+
+            // macOS Dock icon visibility, read once from config.
+            #[cfg(target_os = "macos")]
+            {
+                let hide = app_state
+                    .config
+                    .lock()
+                    .map(|cfg| cfg.hide_dock_icon)
+                    .unwrap_or(false);
+                lifecycle::apply_dock_icon_policy(&app.handle(), hide);
+            }
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // startup critical
             commands::ping,
@@ -94,6 +130,15 @@ pub fn run() {
             // data dir
             commands::get_data_dir,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // Persist window geometry on every exit-request path that bypasses
+    // our explicit quit_app command (Cmd+Q on macOS, system shutdown,
+    // tray menu Quit forwarded by tauri).
+    app.run(|app_handle, event| {
+        if let RunEvent::ExitRequested { .. } = event {
+            lifecycle::persist_on_exit_requested(app_handle);
+        }
+    });
 }

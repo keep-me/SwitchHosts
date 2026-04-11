@@ -26,10 +26,13 @@ pub struct StateFile {
     #[serde(default)]
     pub tree: TreeState,
 
-    /// Catch-all for sub-fields a later sub-step adds (window
-    /// geometry, last-selected, ...). Anything not covered by the
-    /// strongly-typed fields above lands here on read and is written
-    /// back verbatim on save.
+    #[serde(default)]
+    pub window: WindowState,
+
+    /// Catch-all for sub-fields a later sub-step adds (last-selected,
+    /// recent commands, ...). Anything not covered by the strongly-typed
+    /// fields above lands here on read and is written back verbatim
+    /// on save.
     #[serde(default, flatten)]
     pub extras: serde_json::Map<String, Value>,
 }
@@ -39,6 +42,25 @@ pub struct TreeState {
     /// Ids of folder nodes that should render collapsed in the UI.
     #[serde(default, rename = "collapsedNodeIds")]
     pub collapsed_node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WindowState {
+    #[serde(default)]
+    pub main: Option<WindowGeometry>,
+}
+
+/// Persisted window geometry. Coordinates are physical pixels because
+/// Tauri's set_position / set_size APIs accept the physical variants
+/// directly without an intermediate scale-factor conversion.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub maximized: bool,
 }
 
 impl StateFile {

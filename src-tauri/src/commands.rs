@@ -10,12 +10,15 @@
 //! Commands also take a `State<'_, AppState>` when they need shared
 //! storage access.
 
+use std::sync::atomic::Ordering;
+
 use serde_json::{json, Value};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
-use tauri::{AppHandle, Emitter, Runtime, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::import_export;
+use crate::lifecycle::{self, MAIN_WINDOW_LABEL};
 use crate::storage::{
     entries, manifest::{self, Manifest},
     AppState, StorageError, Trashcan,
@@ -458,18 +461,41 @@ pub async fn find_set_replace_history(_args: Args) -> Value {
 // ---- window / misc ---------------------------------------------------------
 
 #[tauri::command]
-pub async fn hide_main_window(_args: Args) -> Value {
+pub async fn hide_main_window<R: Runtime>(app: AppHandle<R>, _args: Args) -> Value {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.hide();
+    }
     Value::Null
 }
 
 #[tauri::command]
-pub async fn focus_main_window(_args: Args) -> Value {
+pub async fn focus_main_window<R: Runtime>(app: AppHandle<R>, _args: Args) -> Value {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
     Value::Null
 }
 
 #[tauri::command]
-pub async fn quit_app(_args: Args) -> Value {
-    Value::Null
+pub async fn quit_app<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, String> {
+    // Persist window geometry while the window is still around. The
+    // ExitRequested run-event hook also covers Cmd+Q / system
+    // shutdown paths; this branch covers the renderer-driven Quit.
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        lifecycle::persist_window_geometry(&window, state.inner());
+    }
+
+    // Flip the flag so the close handler stops intercepting close
+    // events as "hide", then ask Tauri to exit cleanly.
+    state.is_will_quit.store(true, Ordering::SeqCst);
+    app.exit(0);
+    Ok(Value::Null)
 }
 
 #[tauri::command]

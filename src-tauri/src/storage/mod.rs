@@ -19,6 +19,7 @@ pub use error::StorageError;
 pub use paths::V5Paths;
 pub use trashcan::Trashcan;
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
 /// Process-wide shared state held by Tauri as `State<'_, AppState>`.
@@ -27,10 +28,16 @@ use std::sync::Mutex;
 /// `manifest.json` or `trashcan.json`. Commands that only read may
 /// skip it. Commands that mutate must hold the guard until after the
 /// atomic rename lands on both files.
+///
+/// `is_will_quit` distinguishes "user clicked the close button"
+/// (CloseRequested handler hides the window instead of letting it
+/// close) from "user explicitly chose Quit" (`quit_app` command sets
+/// the flag, then `app.exit(0)`).
 pub struct AppState {
     pub paths: V5Paths,
     pub config: Mutex<AppConfig>,
     pub store_lock: Mutex<()>,
+    pub is_will_quit: AtomicBool,
 }
 
 impl AppState {
@@ -54,6 +61,7 @@ impl AppState {
             paths,
             config: Mutex::new(config),
             store_lock: Mutex::new(()),
+            is_will_quit: AtomicBool::new(false),
         })
     }
 
