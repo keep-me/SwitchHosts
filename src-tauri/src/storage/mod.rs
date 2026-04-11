@@ -19,7 +19,7 @@ pub use error::StorageError;
 pub use paths::V5Paths;
 pub use trashcan::Trashcan;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Mutex;
 
 /// Process-wide shared state held by Tauri as `State<'_, AppState>`.
@@ -38,6 +38,10 @@ pub struct AppState {
     pub config: Mutex<AppConfig>,
     pub store_lock: Mutex<()>,
     pub is_will_quit: AtomicBool,
+    /// Epoch milliseconds of the last window-geometry persist. Used by
+    /// the Moved/Resized handlers in `lifecycle` to coalesce writes
+    /// during a drag (which fires 60 events/sec on macOS).
+    pub last_geometry_persist_ms: AtomicU64,
 }
 
 impl AppState {
@@ -62,6 +66,7 @@ impl AppState {
             config: Mutex::new(config),
             store_lock: Mutex::new(()),
             is_will_quit: AtomicBool::new(false),
+            last_geometry_persist_ms: AtomicU64::new(0),
         })
     }
 

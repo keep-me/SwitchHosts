@@ -38,10 +38,10 @@ pub fn run() {
                 .get_webview_window(lifecycle::MAIN_WINDOW_LABEL)
                 .expect("main window declared in tauri.conf.json");
 
-            // Install the close-button-hides handler before any
-            // restore work so an early close still does the right
-            // thing.
-            lifecycle::install_main_close_handler(&main);
+            // Install Moved/Resized/CloseRequested handlers before
+            // any restore work so early events (e.g. platform-driven
+            // initial resize) get captured.
+            lifecycle::install_main_window_handlers(&main);
 
             // Restore main window geometry from internal/state.json
             // (or center on first launch) and reveal the window. The
@@ -51,7 +51,9 @@ pub fn run() {
             let app_state = app.state::<AppState>();
             lifecycle::restore_and_show_main(&main, app_state.inner());
 
-            // macOS Dock icon visibility, read once from config.
+            // macOS Dock icon visibility, read once from config. P2.A
+            // leaves this as a no-op with a warning; P2.B will wire
+            // it up alongside the tray icon.
             #[cfg(target_os = "macos")]
             {
                 let hide = app_state
@@ -133,12 +135,27 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    // Persist window geometry on every exit-request path that bypasses
-    // our explicit quit_app command (Cmd+Q on macOS, system shutdown,
-    // tray menu Quit forwarded by tauri).
-    app.run(|app_handle, event| {
-        if let RunEvent::ExitRequested { .. } = event {
+    // Run-event hook covers two concerns that Builder's `.setup` and
+    // window-level `on_window_event` can't reach:
+    //   * ExitRequested — persist geometry on Cmd+Q / system shutdown
+    //     paths that bypass our explicit quit_app command.
+    //   * Reopen (macOS) — clicking the Dock icon for an app whose
+    //     main window is hidden should re-show it. Tauri does not do
+    //     this automatically; has_visible_windows == false means the
+    //     OS didn't find any windows to bring forward.
+    app.run(|app_handle, event| match event {
+        RunEvent::ExitRequested { .. } => {
             lifecycle::persist_on_exit_requested(app_handle);
         }
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } => {
+            if !has_visible_windows {
+                lifecycle::focus_main_on_second_instance(app_handle, Vec::new(), String::new());
+            }
+        }
+        _ => {}
     });
 }
