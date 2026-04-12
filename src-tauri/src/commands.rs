@@ -18,8 +18,10 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::hosts_apply::{self, ApplyHistoryItem, HostsApplyError};
+use crate::http;
 use crate::import_export;
 use crate::lifecycle::{self, MAIN_WINDOW_LABEL};
+use crate::refresh::{self, RefreshOutcome};
 use crate::storage::{
     entries, manifest::{self, Manifest},
     AppState, StorageError, Trashcan,
@@ -533,13 +535,46 @@ pub async fn toggle_hosts_item(_args: Args) -> Value {
 }
 
 #[tauri::command]
-pub async fn refresh_remote_hosts(_args: Args) -> Value {
-    Value::Null
+pub async fn refresh_remote_hosts<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, String> {
+    let id = args
+        .first()
+        .and_then(Value::as_str)
+        .ok_or_else(|| "refresh_remote_hosts: args[0] must be a string".to_string())?;
+    match refresh::refresh_one(&app, state.inner(), id).await {
+        Ok(RefreshOutcome::Updated { node }) | Ok(RefreshOutcome::Unchanged { node }) => {
+            Ok(json!({ "success": true, "data": node }))
+        }
+        Err(e) => Ok(e.into_renderer_value()),
+    }
 }
 
 #[tauri::command]
-pub async fn refresh_all_remote_hosts(_args: Args) -> Value {
-    Value::Null
+pub async fn refresh_all_remote_hosts<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, String> {
+    let results = refresh::refresh_all(&app, state.inner()).await;
+    let payload: Vec<Value> = results
+        .into_iter()
+        .map(|(id, outcome)| match outcome {
+            Ok(RefreshOutcome::Updated { node }) | Ok(RefreshOutcome::Unchanged { node }) => {
+                json!({ "id": id, "success": true, "data": node })
+            }
+            Err(e) => {
+                let mut v = e.into_renderer_value();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("id".to_string(), json!(id));
+                }
+                v
+            }
+        })
+        .collect();
+    Ok(Value::Array(payload))
 }
 
 #[tauri::command]
@@ -811,7 +846,12 @@ pub async fn import_data_from_url(
 ) -> Result<Value, String> {
     let url = arg_str(&args, 0, "url").map_err(|e| format!("{e:?}"))?;
 
-    let body = match fetch_url(url).await {
+    // Build the HTTP client outside of any lock so the proxy snapshot
+    // doesn't pin store_lock during the network round trip. The
+    // shared `http::build_client` honours `use_proxy` config — this
+    // clears implementation-notes D8.
+    let client = http::build_client(state.inner())?;
+    let body = match fetch_url(&client, url).await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("[v5 import-url] fetch failed: {e}");
@@ -826,8 +866,8 @@ pub async fn import_data_from_url(
     }
 }
 
-async fn fetch_url(url: &str) -> Result<String, String> {
-    let response = reqwest::get(url).await.map_err(|e| e.to_string())?;
+async fn fetch_url(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    let response = client.get(url).send().await.map_err(|e| e.to_string())?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("error_{}", status.as_u16()));

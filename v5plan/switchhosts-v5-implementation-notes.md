@@ -24,7 +24,12 @@
 | Phase 1B step 4 — 手动 import/export | ✅ | `061dbc8` |
 | Phase 1B v5 manifest 格式重构 | ✅ | `5a7eeeb` |
 | Phase 2.A — 主窗口生命周期 | ✅ | (含位置持久化、Reopen、单实例) |
-| Phase 2.E.1 — hosts 内容聚合 + 预览命令 | ✅ | (本子步骤) |
+| Phase 2.E.1 — hosts 内容聚合 + 预览命令 | ✅ | `dbf64cf` |
+| Phase 2.E.2 — `/etc/hosts` 提权写入 + apply history | ✅ | `c69e74f` |
+| Phase 2.E.3 — `cmd_after_hosts_apply` runner | ✅ | `97d268f` |
+| Phase 2.B.1 — 系统托盘图标 + 菜单 + 标题 | ✅ | `05635d0` |
+| Phase 2.B.2 — 托盘 mini-window (`/tray`) | ✅ | `f99a81b` |
+| Phase 2.F — remote hosts 刷新（手动 + 后台） | ✅ | (本子步骤) |
 | Phase 2 — 其余子步骤 | ⏳ | 见 [phase2-plan.md](/Users/wu/studio/SwitchHosts/v5plan/switchhosts-v5-phase2-plan.md) |
 | Phase 3 — updater + 发布链 | ⏳ | 未开始 |
 | Cutover | ⏳ | 未开始 |
@@ -224,11 +229,9 @@ Phase 0b 的 [capabilities-and-commands.md](/Users/wu/studio/SwitchHosts/v5plan/
 
 参见 A10。Phase 2.I 处理。
 
-### D8. `import_data_from_url` 不走代理
+### D8. ~~`import_data_from_url` 不走代理~~ ✅ 已在 P2.F 解决
 
-Phase 1B step 4 的 URL 导入直接 `reqwest::get(url)`，没读取 `use_proxy` / `proxy_*` 配置。
-
-**修复方向**（P2.F）：把 reqwest client 构建抽成 helper，refresh 服务和 import 一起用。
+抽出了 [src-tauri/src/http.rs](/Users/wu/studio/SwitchHosts/src-tauri/src/http.rs) 共享 reqwest client 构造逻辑（30s 超时 + UA + `use_proxy`/`proxy_*` 解析），`refresh::fetch_remote` 和 `commands::import_data_from_url` 都走它。后续要加 TLS 选项 / 重试只改一个地方。
 
 ### D9. tracer / `send_usage_data` 是 no-op
 

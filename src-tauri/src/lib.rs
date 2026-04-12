@@ -1,8 +1,10 @@
 mod commands;
 mod hosts_apply;
+mod http;
 mod import_export;
 mod lifecycle;
 mod migration;
+mod refresh;
 mod storage;
 mod tray;
 
@@ -93,6 +95,10 @@ pub fn run() {
                     String::new(),
                 );
             });
+
+            // Background scanner for remote-hosts auto refresh.
+            // Wakes every 60s, replaces `src/main/libs/cron.ts`.
+            refresh::start_background_scanner(app_handle.clone());
 
             Ok(())
         })
