@@ -185,23 +185,17 @@ Phase 0b 的 [capabilities-and-commands.md](/Users/wu/studio/SwitchHosts/v5plan/
 
 ## 已知问题与债务
 
-### D1. `agent.once` 注册 race（latent）
+### D1. `agent.once` 注册 race — ⏸️ 理论问题，实际不触发
 
-`agent.once(channel, handler)` 在 Tauri 路径下返回**同步**的 off 函数，但内部 `tauri_api_event.once` 的 listener 注册是异步的（promise pending）。
+`agent.once(channel, handler)` 在 Tauri 路径下内部的 listener 注册是异步的（`tauriOnce` 返回 Promise），但调用方（PopupMenu.show）在注册后立刻 invoke。理论上如果 Rust 极快 emit，listener 还没注册完毕，事件会丢失。
 
-理论上可能的 race：renderer 注册 once → 立刻 invoke → Rust 极快 emit → 事件到达 renderer 时 listener 还没注册完毕 → 事件丢失。
+**实际不触发的原因**：Tauri 2 的 webview IPC 是 FIFO 队列。`invoke('plugin:event|listen')` 一定排在 `invoke('popup_menu')` 前面，所以 Rust 侧处理 popup_menu 命令时 listener 已经注册完毕。在烟雾测试中从未复现，popup_menu 在所有三个窗口（main、tray、find）都正常工作。
 
-实际触发概率极低（典型间隔几 ms vs 注册延迟亚 ms），但是 [popup menu](/Users/wu/studio/SwitchHosts/src/renderer/core/PopupMenu.ts) 的实现踩过一脚。Phase 1B step 2.5 的 commit message 已经记录。
+**如果未来要修**：把 `agent.once` 改成返回 `Promise<OffFunction>`，让 PopupMenu.show 变 async 并在 invoke 前 await 所有注册。改动面大（影响所有 once 调用方），风险高于收益，暂不做。
 
-**修复方向**（P2.I 或 P2.D）：把 `PopupMenu.show` 改成 async，先 await 所有 once 注册再 invoke。或者把 `agent.once` 改成返回 `Promise<OffFunction>`，让所有调用方 await。
+### D2. ~~`frontendDist: "../build"` 与 Electron 共享构建目录~~ ✅ 已在 P2.I 解决
 
-### D2. `frontendDist: "../build"` 与 Electron 共享构建目录
-
-[tauri.conf.json](/Users/wu/studio/SwitchHosts/src-tauri/tauri.conf.json) 的 `frontendDist` 指向 `../build`，这个目录现在被 Electron 的 main.js / preload.js 和 renderer 产物**混居**。`tauri build` 跑起来会把整个 `build/` 当成前端资源打进 Tauri bundle，包括 Electron main.js。
-
-**未触发**（我们一直只跑 `tauri:dev`，dev 模式用的是 `devUrl`）。
-
-**修复方向**（P2.I）：新增 `vite.render-tauri.config.mts`，输出到 `build-tauri/`。`frontendDist` 指向新目录。
+新增 npm 脚本 `build:renderer:tauri`，使用 vite CLI 的 `--outDir build-tauri --emptyOutDir` 覆盖，输出到独立的 `build-tauri/` 目录。`tauri.conf.json` 的 `beforeBuildCommand` 和 `frontendDist` 都指向新路径。Electron 的 `build/` 目录不受影响。`build-tauri/` 已加入 `.gitignore`。
 
 ### D3. ~~`tauri.conf.json > version` 硬编码~~ ✅ Rust 侧已在 P2.I 解决
 
@@ -219,31 +213,29 @@ Phase 0b 的 [capabilities-and-commands.md](/Users/wu/studio/SwitchHosts/v5plan/
 
 [scripts/entitlements.mac.plist](/Users/wu/studio/SwitchHosts/scripts/entitlements.mac.plist) 当前只有 JIT 相关两条权限。Tauri 打包时需要把这个 plist 接入到 `tauri.conf.json` 的 macOS 配置里。Phase 3 处理。
 
-### D6. 孤儿 entries/*.hosts 没有 GC
+### D6. ~~孤儿 entries/*.hosts 没有 GC~~ ✅ 已在 P2.I 解决
 
-回收站永久删除 / 节点删除时，对应的 `entries/<id>.hosts` **不会被同步删除**。当前所有 trashcan 命令都注释了"等 Phase 2 实现 permanent delete 时清理"。
+`delete_item_from_trashcan` 和 `clear_trashcan` 现在在从 trashcan.json 移除条目后，通过 `manifest::collect_content_ids` 递归收集所有 local/remote 节点的 id，然后逐一调用 `entries::delete_entry` 删除对应文件。`entries::delete_entry` 的 `#[allow(dead_code)]` 也已移除。
 
-**修复方向**（P2.E 或 P2.I）：`delete_item_from_trashcan` 与 `clear_trashcan` 真实地走 `entries::delete_entry`。
+### D7. ~~Per-window capability 拆分~~ ✅ 已在 P2.I 解决
 
-### D7. Per-window capability 拆分
-
-参见 A10。Phase 2.I 处理。
+`capabilities/default.json` 拆成了三个文件：`main.json`（core:default + dialog:default）、`tray.json`（core:default）、`find.json`（core:default）。Tauri 自动合并目录下所有 capability 文件。只有 main 窗口保留 dialog:default（import/export 的 file picker）。
 
 ### D8. ~~`import_data_from_url` 不走代理~~ ✅ 已在 P2.F 解决
 
 抽出了 [src-tauri/src/http.rs](/Users/wu/studio/SwitchHosts/src-tauri/src/http.rs) 共享 reqwest client 构造逻辑（30s 超时 + UA + `use_proxy`/`proxy_*` 解析），`refresh::fetch_remote` 和 `commands::import_data_from_url` 都走它。后续要加 TLS 选项 / 重试只改一个地方。
 
-### D9. tracer / `send_usage_data` 是 no-op
+### D9. tracer / `send_usage_data` 是 no-op — ⏸️ 有意保留
 
-Electron 版的 tracer 当前也是注释掉的 no-op（参见 [src/main/libs/tracer.ts](/Users/wu/studio/SwitchHosts/src/main/libs/tracer.ts)）。v5 配置项保留但 Rust 侧没有任何实现。**有意识的不做**，未来如果重启上报功能再加。
+Electron 版的 tracer 当前也是注释掉的 no-op。v5 配置项保留但 Rust 侧没有任何实现。**有意识的不做**，未来如果重启上报功能再加。不算 debt，标记为 by-design。
 
 ### D11. ~~缺少 logger 后端~~ ✅ 已在 P2.I 解决
 
 引入 `tauri-plugin-log` (v2)，在 `lib.rs::run` 的 Builder 链里用 `.plugin(tauri_plugin_log::Builder::new().level(log::LevelFilter::Info).build())` 初始化。全代码库 28 处 `eprintln!` 批量替换为对应的 `log::info!` / `log::warn!` / `log::error!`（唯一例外：Windows elevation helper 的 `eprintln!` 保留，因为它在 logger 初始化之前运行）。同时获得了 tauri-plugin-log 的文件日志输出能力，便于 P3 发布后远程问题排查。
 
-### D10. macOS / Linux / Windows 跨平台验收只在 macOS 上做
+### D10. macOS / Linux / Windows 跨平台验收只在 macOS 上做 — ⏸️ Phase 3 / Cutover
 
-整个 Phase 1 都在 macOS 上验证。代码要做到 cargo check 跨三平台通过，但实际运行验收推迟到 Phase 3 / Cutover。Phase 2.E 的提权代码尤其要小心：写好三平台代码，但只有 macOS 实测。
+整个 Phase 1 + 2 都在 macOS 上验证。Linux pkexec + Windows UAC 代码已写好（P2.E.4），但只通过了 macOS 上的 cargo check，未做实际运行验收。实际运行验收推迟到 Phase 3 / Cutover，那时会在各平台 CI 上跑完整测试。
 
 ---
 

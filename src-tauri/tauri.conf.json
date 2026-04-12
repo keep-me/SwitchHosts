@@ -6,8 +6,8 @@
   "build": {
     "beforeDevCommand": "npm run dev:renderer",
     "devUrl": "http://127.0.0.1:8220",
-    "beforeBuildCommand": "npm run build:renderer",
-    "frontendDist": "../build"
+    "beforeBuildCommand": "npm run build:renderer:tauri",
+    "frontendDist": "../build-tauri"
   },
   "app": {
     "windows": [],

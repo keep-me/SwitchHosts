@@ -52,8 +52,7 @@ pub fn write_entry(entries_dir: &Path, id: &str, content: &str) -> Result<(), St
 }
 
 /// Delete a node's content file. No-op if the file is already gone.
-/// Used by trashcan "delete permanently" later in Phase 1B / Phase 2.
-#[allow(dead_code)]
+/// Used by trashcan "delete permanently" and "clear trashcan" commands.
 pub fn delete_entry(entries_dir: &Path, id: &str) -> Result<(), StorageError> {
     let path = entry_path(entries_dir, id)?;
     match std::fs::remove_file(&path) {

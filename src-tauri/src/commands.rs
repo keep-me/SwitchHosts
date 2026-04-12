@@ -354,11 +354,21 @@ pub async fn clear_trashcan(
 ) -> Result<Value, StorageError> {
     let _guard = state.store_lock.lock().expect("store lock poisoned");
     let mut t = load_trashcan(&state).unwrap_or_default();
+
+    // Collect all content ids from every trashcan item before clearing,
+    // then delete the corresponding entries/<id>.hosts files.
+    let mut content_ids = Vec::new();
+    for item in &t.items {
+        if let Some(data) = item.get("data") {
+            manifest::collect_content_ids(std::slice::from_ref(data), &mut content_ids);
+        }
+    }
+    for cid in &content_ids {
+        let _ = entries::delete_entry(&state.paths.entries_dir, cid);
+    }
+
     t.items.clear();
     save_trashcan(&state, &t)?;
-    // Note: we deliberately do NOT delete orphaned entries/*.hosts
-    // files here. Garbage collection of orphan content files lands
-    // alongside the "permanent delete" flow in Phase 2.
     Ok(Value::Null)
 }
 
@@ -370,9 +380,22 @@ pub async fn delete_item_from_trashcan(
     let id = arg_str(&args, 0, "id")?.to_string();
     let _guard = state.store_lock.lock().expect("store lock poisoned");
     let mut t = load_trashcan(&state).unwrap_or_default();
-    let removed = t.remove_item(&id).is_some();
+    let removed_item = t.remove_item(&id);
     save_trashcan(&state, &t)?;
-    Ok(json!(removed))
+
+    // Clean up entries/<id>.hosts files for the permanently deleted item
+    // (and any children if it was a folder).
+    if let Some(item) = &removed_item {
+        if let Some(data) = item.get("data") {
+            let mut content_ids = Vec::new();
+            manifest::collect_content_ids(std::slice::from_ref(data), &mut content_ids);
+            for cid in &content_ids {
+                let _ = entries::delete_entry(&state.paths.entries_dir, cid);
+            }
+        }
+    }
+
+    Ok(json!(removed_item.is_some()))
 }
 
 #[tauri::command]
