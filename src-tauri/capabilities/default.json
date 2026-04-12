@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Shared capability set covering every webview the v5 app currently spawns. Provides the Tauri core defaults plus the dialog plugin for import/export file pickers. The per-window split (separate main / find / tray capability files) is intentionally deferred to P2.I — every window we ship today (main, tray) needs the full surface, so splitting now would be churn without security gain.",
-  "windows": ["main", "tray"],
+  "windows": ["main", "tray", "find"],
   "permissions": ["core:default", "dialog:default"]
 }

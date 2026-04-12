@@ -1,4 +1,6 @@
+mod app_menu;
 mod commands;
+mod find;
 mod hosts_apply;
 mod http;
 mod import_export;
@@ -34,12 +36,20 @@ pub fn run() {
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
             // Tray menu items are routed to the tray module's
-            // dispatch table; popup_menu items are forwarded back to
-            // the renderer as same-named Tauri events. Order matters
-            // only because tray ids are short and never collide with
-            // the long renderer-generated `popup_menu_item_*` ids.
+            // dispatch table; the application menu's Find item
+            // shows the find webview; popup_menu items are forwarded
+            // back to the renderer as same-named Tauri events. Order
+            // matters only because tray / app-menu ids are short and
+            // never collide with the long renderer-generated
+            // `popup_menu_item_*` ids.
             if id.starts_with("tray-") {
                 tray::handle_menu_event(app, id);
+                return;
+            }
+            if id == app_menu::MENU_ID_FIND {
+                if let Err(e) = find::show_find_window(app) {
+                    eprintln!("[v5 menu] failed to show find window: {e}");
+                }
                 return;
             }
             if id.starts_with("popup_menu_item_") {
@@ -62,6 +72,14 @@ pub fn run() {
             // user interaction, so no Moved/Resized events are lost.
             lifecycle::install_main_window_handlers(&main);
             let _ = main.set_focus();
+
+            // Application menu (Phase 2.D minimal: defaults + Find).
+            // The full P2.C menu lands later but we need an entry
+            // point for the find window today, and `Cmd+F` is the
+            // discoverable accelerator from the Electron build.
+            if let Err(e) = app_menu::install(&app_handle) {
+                eprintln!("[v5 menu] failed to install app menu: {e}");
+            }
 
             // Tray icon must exist before we honour `hide_dock_icon`,
             // otherwise an `Accessory` activation policy on macOS would

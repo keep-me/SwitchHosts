@@ -17,6 +17,7 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::find::{self, FindHistoryEntry, FindOptions};
 use crate::hosts_apply::{self, ApplyHistoryItem, HostsApplyError};
 use crate::http;
 use crate::import_export;
@@ -640,43 +641,109 @@ pub async fn cmd_clear_history(
 // ---- find window -----------------------------------------------------------
 
 #[tauri::command]
-pub async fn find_show(_args: Args) -> Value {
-    Value::Null
+pub async fn find_show<R: Runtime>(app: AppHandle<R>, _args: Args) -> Result<Value, String> {
+    find::show_find_window(&app).map_err(|e| e.to_string())?;
+    Ok(Value::Null)
 }
 
 #[tauri::command]
-pub async fn find_by(_args: Args) -> Value {
-    json!([])
+pub async fn find_by(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, String> {
+    let keyword = args
+        .first()
+        .and_then(Value::as_str)
+        .ok_or_else(|| "find_by: args[0] must be a string keyword".to_string())?
+        .to_string();
+    let options: FindOptions = match args.get(1) {
+        Some(v) if !v.is_null() => serde_json::from_value(v.clone())
+            .map_err(|e| format!("find_by: invalid options: {e}"))?,
+        _ => FindOptions::default(),
+    };
+    let items = find::find_in_manifest(state.inner(), &keyword, &options)?;
+    serde_json::to_value(items).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn find_add_history(_args: Args) -> Value {
-    Value::Null
+pub async fn find_add_history(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let entry: FindHistoryEntry = match args.into_iter().next() {
+        Some(v) => serde_json::from_value(v).map_err(|e| StorageError::InvalidConfigValue {
+            key: "find_add_history.args[0]".into(),
+            reason: e.to_string(),
+        })?,
+        None => {
+            return Err(StorageError::InvalidConfigValue {
+                key: "find_add_history.args[0]".into(),
+                reason: "expected a FindHistoryEntry object".into(),
+            });
+        }
+    };
+    let all = find::add_find_history(state.inner(), entry)?;
+    Ok(serde_json::to_value(all).map_err(|e| StorageError::serialize("find.json", e))?)
 }
 
 #[tauri::command]
-pub async fn find_get_history(_args: Args) -> Value {
-    json!([])
+pub async fn find_get_history(
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, StorageError> {
+    let all = find::get_find_history(state.inner())?;
+    Ok(serde_json::to_value(all).map_err(|e| StorageError::serialize("find.json", e))?)
 }
 
 #[tauri::command]
-pub async fn find_set_history(_args: Args) -> Value {
-    Value::Null
+pub async fn find_set_history(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let items: Vec<FindHistoryEntry> = match args.into_iter().next() {
+        Some(Value::Array(arr)) => arr
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<FindHistoryEntry>(v).ok())
+            .collect(),
+        _ => Vec::new(),
+    };
+    find::set_find_history(state.inner(), &items)?;
+    Ok(Value::Null)
 }
 
 #[tauri::command]
-pub async fn find_add_replace_history(_args: Args) -> Value {
-    Value::Null
+pub async fn find_add_replace_history(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let value = arg_str(&args, 0, "find_add_replace_history")?.to_string();
+    let all = find::add_replace_history(state.inner(), value)?;
+    Ok(serde_json::to_value(all).map_err(|e| StorageError::serialize("replace.json", e))?)
 }
 
 #[tauri::command]
-pub async fn find_get_replace_history(_args: Args) -> Value {
-    json!([])
+pub async fn find_get_replace_history(
+    state: State<'_, AppState>,
+    _args: Args,
+) -> Result<Value, StorageError> {
+    let all = find::get_replace_history(state.inner())?;
+    Ok(serde_json::to_value(all).map_err(|e| StorageError::serialize("replace.json", e))?)
 }
 
 #[tauri::command]
-pub async fn find_set_replace_history(_args: Args) -> Value {
-    Value::Null
+pub async fn find_set_replace_history(
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
+    let items: Vec<String> = match args.into_iter().next() {
+        Some(Value::Array(arr)) => arr
+            .into_iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    };
+    find::set_replace_history(state.inner(), &items)?;
+    Ok(Value::Null)
 }
 
 // ---- window / misc ---------------------------------------------------------
