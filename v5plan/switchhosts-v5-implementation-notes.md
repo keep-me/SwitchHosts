@@ -2,15 +2,13 @@
 
 ## 目的
 
-这份文件捕获 Phase 0 / Phase 1 实施过程中沉淀下来的关键决策、模式和未解决的债务。它的作用是**让任何在 Phase 2+ 阶段加入的人能在 30 分钟内重建上下文**——既包括为什么某些代码长成这个样子，也包括有意识保留下来的坑。
+这份文件捕获 Phase 0 → Phase 2 实施过程中沉淀下来的关键决策、模式和已解决 / 待解决的债务。它的作用是**让任何在 Phase 3+ 阶段加入的人能在 30 分钟内重建上下文**——既包括为什么某些代码长成这个样子，也包括有意识保留下来的坑。
 
 它不是设计文档（那些在 storage-plan / tauri-migration-plan 里），也不是教程，而是一份"如果我明天忘掉一切，我希望先读这个"的速查表。
 
-每次完成一个 Phase 2 子步骤后，建议来这里更新一下相关条目。
-
 ---
 
-## 当前进度（截至 Phase 1B 收尾）
+## 当前进度（截至 Phase 2 + 债务清理完毕）
 
 | 阶段 | 状态 | 代表 commit |
 |---|---|---|
@@ -23,14 +21,19 @@
 | Phase 1B step 3 — PotDb 迁移 | ✅ | `86de7df` |
 | Phase 1B step 4 — 手动 import/export | ✅ | `061dbc8` |
 | Phase 1B v5 manifest 格式重构 | ✅ | `5a7eeeb` |
-| Phase 2.A — 主窗口生命周期 | ✅ | (含位置持久化、Reopen、单实例) |
+| Phase 2.A — 主窗口生命周期 | ✅ | `9c92c54` + `3a3dd70` + `9d8afa9` |
 | Phase 2.E.1 — hosts 内容聚合 + 预览命令 | ✅ | `dbf64cf` |
 | Phase 2.E.2 — `/etc/hosts` 提权写入 + apply history | ✅ | `c69e74f` |
 | Phase 2.E.3 — `cmd_after_hosts_apply` runner | ✅ | `97d268f` |
+| Phase 2.E.4 — Linux pkexec + Windows UAC (编译覆盖) | ✅ | `05507a5` |
 | Phase 2.B.1 — 系统托盘图标 + 菜单 + 标题 | ✅ | `05635d0` |
 | Phase 2.B.2 — 托盘 mini-window (`/tray`) | ✅ | `f99a81b` |
-| Phase 2.F — remote hosts 刷新（手动 + 后台） | ✅ | (本子步骤) |
-| Phase 2 — 其余子步骤 | ⏳ | 见 [phase2-plan.md](/Users/wu/studio/SwitchHosts/v5plan/switchhosts-v5-phase2-plan.md) |
+| Phase 2.C — 完整应用菜单 + open_url | ✅ | `b5c160c` |
+| Phase 2.D — 查找窗口 + 搜索引擎 | ✅ | `af4dbac` |
+| Phase 2.F — remote hosts 刷新（手动 + 后台 cron） | ✅ | `7af1df3` |
+| Phase 2.G — 本地 HTTP API (port 50761) | ✅ | `4d5127d` |
+| P2.I 债务清理 — D2/D3/D6/D7/D8/D11 代码修复 | ✅ | `4403371` + `0171563` + `1847b1d` |
+| P2.I 债务标记 — D1/D4/D5/D9/D10 文档归档 | ✅ | `1847b1d` |
 | Phase 3 — updater + 发布链 | ⏳ | 未开始 |
 | Cutover | ⏳ | 未开始 |
 
@@ -173,13 +176,11 @@ manifest.json 是"迁移完成"的提交标记。Step 6 失败的话，下次启
 
 **Phase 2 启示**：v5 → v6 升级时仍然要保留这个降级提示模式。
 
-### A10. 命令暴露广度：所有窗口都能调所有命令（暂时）
+### A10. Per-window capability 拆分（已完成）
 
-Phase 0b 的 [capabilities-and-commands.md](/Users/wu/studio/SwitchHosts/v5plan/switchhosts-v5-capabilities-and-commands.md) 设计了 13 个命令组的 `main × find × tray` 暴露矩阵，但**当前的 [src-tauri/capabilities/default.json](/Users/wu/studio/SwitchHosts/src-tauri/capabilities/default.json) 只是一个对所有窗口开放 core+dialog 的扁平文件**。所有自定义命令现在对所有窗口都开放（Tauri 2 自定义命令默认不被 capability 收口）。
+`capabilities/` 目录现在有三个文件：`main.json`（core:default + dialog:default）、`tray.json`（core:default）、`find.json`（core:default）。Tauri 自动合并目录下所有 capability 文件，每个窗口只获得其文件里列出的权限。只有 main 窗口保留 dialog:default（import/export 的 file picker）。
 
-这是有意识的延后：拆 capability 文件需要先创建 find 窗口和 tray 窗口（Phase 2.B 和 2.D），不然没东西可拆。
-
-**Phase 2 启示**：P2.I 的"per-window capability 拆分"任务负责把这个补上。
+注意：Tauri 2 的自定义命令（`#[tauri::command]`）默认不受 capability 限制——所有窗口都能调用所有注册的命令。收口自定义命令需要额外的 ACL 配置，目前未做。如果未来需要严格隔离（比如不让 tray 窗口调 export_data），可以在 capability 文件里加 `deny` 规则。
 
 ---
 
@@ -260,9 +261,26 @@ Electron 版的 tracer 当前也是注释掉的 no-op。v5 配置项保留但 Ru
 ```
 src-tauri/src/
 ├── main.rs                      # 仅入口
-├── lib.rs                       # Builder 装配 + invoke_handler 注册 + 全局菜单事件
-├── commands.rs                  # ~52 个 #[tauri::command]
+├── lib.rs                       # Builder 装配 + invoke_handler 注册 + 全局菜单/托盘事件
+│                                  + Windows elevation helper early argv check
+│                                  + background scanner spawn + HTTP API boot
+├── app_menu.rs                  # 完整应用菜单（File/Edit/View/Window/Help）(P2.C)
+├── commands.rs                  # ~52 个 #[tauri::command]，全部已接通真实实现
+├── find.rs                      # 查找窗口创建 + 搜索引擎 + find/replace 历史 (P2.D)
+├── http.rs                      # 共享 reqwest::Client 构造（代理 + UA + 超时）
+├── http_api.rs                  # 本地 HTTP API (axum, port 50761, 4 routes) (P2.G)
 ├── import_export.rs             # v3/v4/v5 backup 读写 (Phase 1B step 4)
+├── lifecycle.rs                 # 主窗口创建 + 几何持久化 + close/reopen/dock (P2.A)
+├── refresh.rs                   # remote hosts 刷新 + 60s 后台 cron (P2.F)
+├── tray.rs                      # 系统托盘图标 + 菜单 + mini-window + 标题 (P2.B)
+├── hosts_apply/
+│   ├── mod.rs                   # 公共 re-exports
+│   ├── aggregate.rs             # 选中节点内容聚合 + 去重 (P2.E.1)
+│   ├── write.rs                 # 写入编排：行尾规范化 / append 模式 / 直写→提权 (P2.E.2)
+│   ├── elevation.rs             # macOS osascript / Linux pkexec / Windows ShellExecuteExW
+│   ├── error.rs                 # HostsApplyError enum (NoAccess / Cancelled / Io)
+│   ├── history.rs               # internal/histories/system-hosts.json 日志
+│   └── cmd_runner.rs            # cmd_after_hosts_apply 30s 超时执行器 + 日志 (P2.E.3)
 ├── migration/
 │   ├── mod.rs                   # PotDb 首次启动迁移编排
 │   ├── potdb.rs                 # 直接解析 PotDb 目录的 reader
@@ -273,33 +291,60 @@ src-tauri/src/
     ├── error.rs                 # StorageError enum (serde tagged)
     ├── paths.rs                 # V5Paths 结构
     ├── config.rs                # internal/config.json AppConfig
-    ├── state.rs                 # internal/state.json StateFile
+    ├── state.rs                 # internal/state.json StateFile (含窗口几何)
     ├── manifest.rs              # manifest.json + 树操作 + state 联动
     ├── trashcan.rs              # trashcan.json
-    ├── entries.rs               # entries/<id>.hosts read/write/delete
+    ├── entries.rs               # entries/<id>.hosts read/write/delete (含 GC)
     └── tree_format.rs           # legacy <-> v5 节点形状双向翻译
 
 src-tauri/capabilities/
-└── default.json                 # 暂时单文件，P2.I 要拆成 main/find/tray/shared
+├── main.json                    # main 窗口：core:default + dialog:default
+├── tray.json                    # tray 窗口：core:default
+└── find.json                    # find 窗口：core:default
 
 src-tauri/
-├── Cargo.toml                   # tauri 2 + plugin-dialog + reqwest + dirs + thiserror + chrono + log
-├── tauri.conf.json              # devCsp / csp 已拆分；frontendDist 还指向 ../build (D2)
-├── build.rs                     # tauri_build::build()
-└── icons/                       # 从 assets/app.svg 生成
+├── Cargo.toml                   # tauri 2 (tray-icon, image-png) + plugin-dialog
+│                                  + plugin-log + plugin-single-instance + reqwest
+│                                  + chrono + tokio + regex + axum + open
+│                                  + [target.windows] windows-sys 0.60
+├── tauri.conf.json              # devUrl → 127.0.0.1:8220; frontendDist → ../build-tauri
+├── build.rs                     # tauri_build + 版本号注入 (SWH_VERSION_*)
+└── icons/
+    ├── icon.icns / icon.ico / icon.png / 32x32 / 64x64 / 128x128(@2x)  # app 图标
+    ├── tray-mac.png             # macOS 菜单栏模板图标 (32×32, B/W + alpha)
+    └── tray.png                 # Linux/Windows 托盘图标 (512×512, 彩色)
 
-src/renderer/core/
-└── agent.ts                     # 运行时分发：Electron preload vs Tauri invoke
+src/renderer/
+├── core/agent.ts                # 运行时分发：Electron preload vs Tauri invoke
+├── core/PopupMenu.ts            # 原生右键菜单桥
+├── components/List/ListItem.tsx # 修复：订阅 set_hosts_on_status 回滚开关状态
+├── pages/tray.tsx               # 托盘 mini-window UI (P2.B.2)
+└── pages/find.tsx               # 查找窗口 UI (P2.D)
 ```
 
 ---
 
-## 未来文档维护
+## Phase 3 前置事项
 
-进 Phase 2 之后，每完成一个子步骤，更新本文件的：
+Phase 1 + 2 的功能迁移和债务清理已全部完成。进入 Phase 3（updater + 发布链）前，以下事项需要落地：
+
+| 事项 | 状态 | 说明 |
+|---|---|---|
+| D4: `bundle.targets` 收窄 | ⏳ | 按 CI 构建主机平台配置，避免在缺少 deb/appimage 工具的机器上 fail |
+| D5: macOS entitlements plist | ⏳ | 把现有 `scripts/entitlements.mac.plist` 接入 `tauri.conf.json` |
+| D10: 跨平台运行验收 | ⏳ | Linux + Windows 上首次真实运行测试，重点验证 pkexec / UAC elevation |
+| `tauri.conf.json > version` 自动注入 | ⏳ | npm pre-build 脚本从 `src/version.json` 写入 conf（Rust 侧已自动） |
+| Tauri updater 插件接入 | ⏳ | `tauri-plugin-updater`，替换 `electron-updater` |
+| 签名 + 公证 | ⏳ | macOS: code sign + notarize; Windows: code sign; Linux: N/A |
+| CI/CD 发布脚本 | ⏳ | GitHub Actions workflow，三平台构建 + 发布到 GitHub Releases |
+| `.tmp` 文件清理 | ⏳ | 启动时扫描并删除 `atomic_write` 留下的 `.tmp` 残留 |
+
+## 文档维护
+
+进 Phase 3 之后，每完成一个子步骤，更新本文件的：
 
 - "当前进度"表的对应行
-- 相关"已知问题与债务"条目（修复或新增）
+- "Phase 3 前置事项"表的状态
 - "速查"清单里新增的文件
 
-`phase2-plan.md` 反过来：实施过程中如果发现某个子步骤的 scope 需要调整，先在那边改 scope，再动代码。
+`phase2-plan.md` 在 Phase 2 完成后变为只读参考。Phase 3 如需独立计划文档，在 `v5plan/` 下新建。
