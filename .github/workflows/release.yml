@@ -125,6 +125,7 @@ jobs:
           fi
 
       - name: Build and release (Tauri)
+        id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -167,9 +168,9 @@ jobs:
             Windows) PLATFORM="windows" ;;
           esac
 
-          RELEASE_ID=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id' 2>/dev/null || true)
+          RELEASE_ID="${{ steps.tauri.outputs.releaseId }}"
           if [ -z "$RELEASE_ID" ]; then
-            echo "No release found for $TAG — skipping rename"
+            echo "No release ID from tauri-action — skipping rename"
             exit 0
           fi
 
