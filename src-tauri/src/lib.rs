@@ -3,6 +3,7 @@ mod commands;
 mod find;
 mod hosts_apply;
 mod http;
+mod http_api;
 mod import_export;
 mod lifecycle;
 mod migration;
@@ -117,6 +118,20 @@ pub fn run() {
             // Background scanner for remote-hosts auto refresh.
             // Wakes every 60s, replaces `src/main/libs/cron.ts`.
             refresh::start_background_scanner(app_handle.clone());
+
+            // Local HTTP API on port 50761. Only started if the user
+            // turned it on in the preferences pane; the config_set /
+            // config_update commands also call start/stop on the fly
+            // when the renderer flips the toggle.
+            let (http_on, only_local) = {
+                let cfg = app_state.config.lock().expect("config mutex poisoned");
+                (cfg.http_api_on, cfg.http_api_only_local)
+            };
+            if http_on {
+                if let Err(e) = http_api::start(app_handle.clone(), only_local) {
+                    eprintln!("[v5 http_api] startup failed: {e}");
+                }
+            }
 
             Ok(())
         })

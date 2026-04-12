@@ -1,0 +1,230 @@
+//! Local HTTP API server.
+//!
+//! Reproduces the four routes the Electron build exposed via Hono on
+//! port 50761:
+//!
+//! | Method | Path           | Body |
+//! |--------|----------------|------|
+//! | GET    | `/`            | `Hello SwitchHosts!` |
+//! | GET    | `/remote-test` | `# remote-test\n# <timestamp>` |
+//! | GET    | `/api/list`    | `{success, data: flat_list}` JSON |
+//! | GET    | `/api/toggle?id=<id>` | `ok` / `bad id.` / `not found.` |
+//!
+//! Lifecycle:
+//!
+//! - `start(app, only_local)` binds to `127.0.0.1:50761` (only_local =
+//!   true) or `0.0.0.0:50761` (only_local = false), spawns a tokio
+//!   task that runs the axum router, and stores the join handle in a
+//!   process-wide `Mutex`. Subsequent `start` calls with the same
+//!   `only_local` are no-ops; calls with a different value tear down
+//!   and rebind.
+//! - `stop()` aborts the join handle and clears the slot.
+//! - The bootstrap path in `lib.rs::run` calls `start` once at startup
+//!   if `config.http_api_on == true`. The `config_set` /
+//!   `config_update` commands call `start` / `stop` whenever the
+//!   `http_api_on` or `http_api_only_local` keys change so the server
+//!   stays in sync with the renderer's preferences pane without a
+//!   restart.
+//!
+//! Toggle behaviour: matches the Electron implementation byte for
+//! byte — the toggle handler emits the `toggle_item` event with the
+//! flipped `on` value, and the main window's `onToggleItem` listener
+//! handles the actual apply pipeline (including `choice_mode` /
+//! folder semantics from `setOnStateOfItem`). The v5 storage plan
+//! noted that doing the apply directly inside the HTTP handler would
+//! work even when no renderer is alive, but in our build the main
+//! window is created at startup and only ever hidden, so the
+//! broadcast always reaches a live listener. The simpler port keeps
+//! `choice_mode` semantics centralised in one place.
+
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Mutex;
+
+use axum::extract::{Query, State};
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::get;
+use axum::Router;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter, Manager, Wry};
+
+use crate::storage::{manifest::Manifest, AppState};
+
+// We pin the HTTP API to the default `Wry` runtime instead of staying
+// generic over `R: Runtime`. axum's `Handler` trait requires the
+// extracted state to be `Clone + Send + Sync + 'static`, and a derived
+// `Clone` on a `<R>`-parameterised wrapper struct requires `R: Clone`
+// which `Runtime` doesn't guarantee. Pinning to `Wry` is harmless —
+// it's the only runtime we ship, the test runtime never reaches this
+// code path.
+
+pub const HTTP_API_PORT: u16 = 50761;
+
+struct ServerHandle {
+    task: tauri::async_runtime::JoinHandle<()>,
+    only_local: bool,
+}
+
+static SERVER: Mutex<Option<ServerHandle>> = Mutex::new(None);
+
+/// Start the HTTP server. Idempotent: a second call with the same
+/// `only_local` value is a no-op; with a different value the existing
+/// server is stopped and a new one is bound.
+pub fn start(app: AppHandle<Wry>, only_local: bool) -> Result<(), String> {
+    let mut guard = SERVER.lock().expect("http server mutex poisoned");
+    if let Some(existing) = guard.as_ref() {
+        if existing.only_local == only_local {
+            return Ok(());
+        }
+    }
+    if let Some(prev) = guard.take() {
+        prev.task.abort();
+    }
+
+    let ip = if only_local {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    } else {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    };
+    let addr = SocketAddr::new(ip, HTTP_API_PORT);
+
+    let app_for_task = app.clone();
+    let task = tauri::async_runtime::spawn(async move {
+        if let Err(e) = serve(app_for_task, addr).await {
+            eprintln!("[v5 http_api] serve error: {e}");
+        }
+    });
+
+    *guard = Some(ServerHandle { task, only_local });
+    eprintln!("[v5 http_api] listening on http://{addr}");
+    Ok(())
+}
+
+/// Stop the HTTP server if it's running.
+pub fn stop() {
+    let mut guard = SERVER.lock().expect("http server mutex poisoned");
+    if let Some(handle) = guard.take() {
+        handle.task.abort();
+        eprintln!("[v5 http_api] stopped");
+    }
+}
+
+// ---- routes ----------------------------------------------------------------
+
+async fn serve(app: AppHandle<Wry>, addr: SocketAddr) -> Result<(), String> {
+    let router = Router::new()
+        .route("/", get(home))
+        .route("/remote-test", get(remote_test))
+        .route("/api/list", get(api_list))
+        .route("/api/toggle", get(api_toggle))
+        .with_state(AppRouterState { app });
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| format!("bind {addr}: {e}"))?;
+    axum::serve(listener, router)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Clone)]
+struct AppRouterState {
+    app: AppHandle<Wry>,
+}
+
+async fn home() -> &'static str {
+    "Hello SwitchHosts!"
+}
+
+async fn remote_test() -> String {
+    let now = chrono::Local::now().format("%a %b %e %Y %H:%M:%S GMT%z");
+    format!("# remote-test\n# {now}")
+}
+
+async fn api_list(State(state): State<AppRouterState>) -> Response {
+    let app_state = state.app.state::<AppState>();
+    match Manifest::load(&app_state.paths) {
+        Ok(manifest) => {
+            let flat = flatten_root(&manifest.root);
+            Json(json!({ "success": true, "data": flat })).into_response()
+        }
+        Err(e) => Json(json!({
+            "success": false,
+            "message": e.to_string(),
+        }))
+        .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ToggleQuery {
+    id: Option<String>,
+}
+
+async fn api_toggle(
+    State(state): State<AppRouterState>,
+    Query(q): Query<ToggleQuery>,
+) -> &'static str {
+    let Some(id) = q.id else {
+        return "bad id.";
+    };
+    if id.is_empty() {
+        return "bad id.";
+    }
+    eprintln!("[v5 http_api] toggle: {id}");
+
+    let app_state = state.app.state::<AppState>();
+    let manifest = match Manifest::load(&app_state.paths) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[v5 http_api] manifest load failed: {e}");
+            return "not found.";
+        }
+    };
+    let Some(node) = find_node(&manifest.root, &id) else {
+        return "not found.";
+    };
+    let on = node.get("on").and_then(Value::as_bool).unwrap_or(false);
+
+    // Mirror Electron: broadcast `toggle_item` so the main window's
+    // existing onToggleItem handler runs the full apply pipeline,
+    // including choice_mode / folder cascading semantics from
+    // `setOnStateOfItem`. The envelope is the same `_args` shape every
+    // other Tauri broadcast in this codebase uses.
+    let _ = state.app.emit(
+        "toggle_item",
+        json!({ "_args": [id, !on] }),
+    );
+    "ok"
+}
+
+// ---- tree helpers ----------------------------------------------------------
+
+fn flatten_root(nodes: &[Value]) -> Vec<Value> {
+    let mut out = Vec::new();
+    walk(nodes, &mut out);
+    out
+}
+
+fn walk(nodes: &[Value], out: &mut Vec<Value>) {
+    for node in nodes {
+        out.push(node.clone());
+        if let Some(children) = node.get("children").and_then(Value::as_array) {
+            walk(children, out);
+        }
+    }
+}
+
+fn find_node(nodes: &[Value], id: &str) -> Option<Value> {
+    for node in nodes {
+        if node.get("id").and_then(Value::as_str) == Some(id) {
+            return Some(node.clone());
+        }
+        if let Some(children) = node.get("children").and_then(Value::as_array) {
+            if let Some(found) = find_node(children, id) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}

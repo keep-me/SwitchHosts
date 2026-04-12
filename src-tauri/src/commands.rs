@@ -14,12 +14,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
-use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow, Wry};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::find::{self, FindHistoryEntry, FindOptions};
 use crate::hosts_apply::{self, ApplyHistoryItem, HostsApplyError};
 use crate::http;
+use crate::http_api;
 use crate::import_export;
 use crate::lifecycle::{self, MAIN_WINDOW_LABEL};
 use crate::refresh::{self, RefreshOutcome};
@@ -128,7 +129,11 @@ pub async fn config_get(state: State<'_, AppState>, args: Args) -> Result<Value,
 }
 
 #[tauri::command]
-pub async fn config_set(state: State<'_, AppState>, args: Args) -> Result<Value, StorageError> {
+pub async fn config_set(
+    app: AppHandle<Wry>,
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
     let key = args
         .first()
         .and_then(Value::as_str)
@@ -144,11 +149,16 @@ pub async fn config_set(state: State<'_, AppState>, args: Args) -> Result<Value,
         cfg.set_key(&key, value)?;
     }
     state.persist_config()?;
+    apply_side_effects(&app, state.inner(), &[key.as_str()]);
     Ok(Value::Null)
 }
 
 #[tauri::command]
-pub async fn config_update(state: State<'_, AppState>, args: Args) -> Result<Value, StorageError> {
+pub async fn config_update(
+    app: AppHandle<Wry>,
+    state: State<'_, AppState>,
+    args: Args,
+) -> Result<Value, StorageError> {
     let patch = args.first().cloned().unwrap_or(Value::Null);
     if patch.is_null() {
         return Err(StorageError::InvalidConfigValue {
@@ -156,12 +166,55 @@ pub async fn config_update(state: State<'_, AppState>, args: Args) -> Result<Val
             reason: "config_update requires a partial object as the first argument".into(),
         });
     }
+    let touched: Vec<String> = patch
+        .as_object()
+        .map(|obj| obj.keys().cloned().collect())
+        .unwrap_or_default();
     {
         let mut cfg = state.config.lock().expect("config mutex poisoned");
         cfg.apply_partial(&patch)?;
     }
     state.persist_config()?;
+    let touched_refs: Vec<&str> = touched.iter().map(String::as_str).collect();
+    apply_side_effects(&app, state.inner(), &touched_refs);
     Ok(Value::Null)
+}
+
+/// Run any out-of-process side effects that depend on a config key
+/// just changing. Currently:
+///
+/// - `http_api_on` / `http_api_only_local` → start, stop or rebind
+///   the local HTTP API server.
+///
+/// More keys will land here as Phase 2 progresses (theme switch,
+/// hide_dock_icon, etc.). Always reads the *fresh* config snapshot
+/// rather than trusting the patch, so a rebind picks up both keys
+/// even if only one of them was in the patch.
+///
+/// Pinned to `Wry` because the only side effect today is the HTTP
+/// API server, which is itself pinned to `Wry` (see the comment in
+/// `http_api.rs`).
+fn apply_side_effects(
+    app: &AppHandle<Wry>,
+    state: &AppState,
+    touched_keys: &[&str],
+) {
+    let touches_http_api = touched_keys
+        .iter()
+        .any(|k| *k == "http_api_on" || *k == "http_api_only_local");
+    if touches_http_api {
+        let (on, only_local) = {
+            let cfg = state.config.lock().expect("config mutex poisoned");
+            (cfg.http_api_on, cfg.http_api_only_local)
+        };
+        if on {
+            if let Err(e) = http_api::start(app.clone(), only_local) {
+                eprintln!("[v5 http_api] reconfigure failed: {e}");
+            }
+        } else {
+            http_api::stop();
+        }
+    }
 }
 
 // ---- list / tree -----------------------------------------------------------
