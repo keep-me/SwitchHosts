@@ -159,7 +159,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.tag.outputs.name }}"
-          VERSION="${TAG#v}"
+          # Read version from package.json (the source of truth) rather
+          # than deriving from the git tag — the tag may have a pre-release
+          # suffix that doesn't match the bundle file names when the user
+          # forgot to `npm version` before tagging.
+          VERSION=$(node -p "require('./package.json').version")
           REPO="${{ github.repository }}"
 
           case "${{ runner.os }}" in
