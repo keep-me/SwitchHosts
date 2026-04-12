@@ -146,3 +146,55 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }}
+
+      # Rename release assets to the project's convention:
+      #   SwitchHosts-{version}-{platform}-{arch}.{ext}
+      # Uses the GitHub API PATCH endpoint to rename in place (no
+      # re-download / re-upload needed).
+      - name: Rename release assets
+        if: steps.tag.outputs.name != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          VERSION="${TAG#v}"
+          REPO="${{ github.repository }}"
+
+          case "${{ runner.os }}" in
+            macOS)   PLATFORM="mac" ;;
+            Linux)   PLATFORM="linux" ;;
+            Windows) PLATFORM="windows" ;;
+          esac
+
+          RELEASE_ID=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id' 2>/dev/null || true)
+          if [ -z "$RELEASE_ID" ]; then
+            echo "No release found for $TAG — skipping rename"
+            exit 0
+          fi
+
+          gh api "repos/$REPO/releases/$RELEASE_ID/assets" --paginate \
+            --jq '.[] | "\(.id)\t\(.name)"' | while IFS=$'\t' read -r AID NAME; do
+
+            # Only touch SwitchHosts artifacts
+            case "$NAME" in SwitchHosts*) ;; *) continue ;; esac
+
+            NEW="$NAME"
+
+            # 1. Main pattern: SwitchHosts_{ver}_{arch}… → SwitchHosts-{ver}-{platform}-{arch}…
+            NEW=$(echo "$NEW" | sed "s|^SwitchHosts_${VERSION}_|SwitchHosts-${VERSION}-${PLATFORM}-|")
+
+            # 2. macOS .app.tar.gz has no version: SwitchHosts_universal… → insert version + platform
+            NEW=$(echo "$NEW" | sed "s|^SwitchHosts_universal|SwitchHosts-${VERSION}-${PLATFORM}-universal|")
+
+            # 3. RPM uses its own format: SwitchHosts-{ver}-1.x86_64.rpm → normalise
+            NEW=$(echo "$NEW" | sed "s|^SwitchHosts-${VERSION}-1\\.x86_64|SwitchHosts-${VERSION}-${PLATFORM}-x86_64|")
+
+            # 4. Drop _en-US from MSI name
+            NEW=$(echo "$NEW" | sed "s|_en-US\\.msi|.msi|")
+
+            if [ "$NEW" != "$NAME" ]; then
+              echo "  $NAME → $NEW"
+              gh api -X PATCH "repos/$REPO/releases/assets/$AID" -f name="$NEW" --silent
+            fi
+          done
