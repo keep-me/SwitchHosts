@@ -65,7 +65,7 @@ jobs:
             args: --target universal-apple-darwin
             rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
           - platform: macos-latest
-            args: --target aarch64-apple-darwin
+            args: --target aarch64-apple-darwin -v
             rust_targets: aarch64-apple-darwin
           - platform: macos-latest
             args: --target x86_64-apple-darwin

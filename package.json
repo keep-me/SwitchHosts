@@ -1,6 +1,6 @@
 {
   "private": true,
-  "version": "5.0.0-beta.11",
+  "version": "5.0.0-beta.12",
   "scripts": {
     "start": "cross-env NODE_ENV=development electron ./build/main.js",
     "pretest": "rimraf ./test/tmp",
