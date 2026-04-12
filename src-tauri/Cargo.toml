@@ -28,6 +28,16 @@ tokio = { version = "1", features = ["process", "time", "rt", "macros", "net"] }
 regex = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "json"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_System_Com",
+] }
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

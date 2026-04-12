@@ -16,8 +16,46 @@ use tauri::{Emitter, Listener, Manager, RunEvent};
 
 use storage::AppState;
 
+/// Early argv check for the Windows elevation helper. On macOS / Linux
+/// this always returns false. On Windows, if the binary was spawned by
+/// [`hosts_apply::elevation::elevate_copy`] with
+/// `--swh-elevated-apply-hosts <src> <dst>`, we perform a plain
+/// `std::fs::copy` (CopyFileW under the hood — preserves the
+/// destination's NTFS ACL) and exit before any Tauri / storage code
+/// runs. The parent waits for our exit code.
+fn maybe_run_as_elevation_helper() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() != 4 || args[1] != "--swh-elevated-apply-hosts" {
+        return false;
+    }
+    let src = std::path::Path::new(&args[2]);
+    let dst = std::path::Path::new(&args[3]);
+    let exit_code = match std::fs::copy(src, dst) {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!(
+                "[v5 elevation-helper] copy {} -> {} failed: {e}",
+                src.display(),
+                dst.display()
+            );
+            1
+        }
+    };
+    std::process::exit(exit_code);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Windows elevation helper: when SwitchHosts is relaunched via
+    // ShellExecuteExW with `runas` to perform a privileged hosts file
+    // copy (see `hosts_apply::elevation`), the elevated child re-enters
+    // this function with a special argv shape. Detect it, do the copy,
+    // and exit before the v5 storage layer or the Tauri runtime starts.
+    // This block is a no-op on macOS / Linux (they don't self-relaunch).
+    if maybe_run_as_elevation_helper() {
+        return;
+    }
+
     let state = AppState::bootstrap()
         .expect("failed to bootstrap SwitchHosts v5 storage layer");
 
