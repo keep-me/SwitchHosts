@@ -30,7 +30,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:info": "tauri info",
-    "build:renderer:tauri": "vite build --config ./vite.render.config.mts --outDir build-tauri --emptyOutDir"
+    "build:renderer:tauri": "node scripts/sync-tauri-version.mjs && vite build --config ./vite.render.config.mts --outDir build-tauri --emptyOutDir"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.11",

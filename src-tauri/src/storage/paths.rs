@@ -62,6 +62,27 @@ impl V5Paths {
         create_dir_all(&self.histories_dir)?;
         Ok(())
     }
+
+    /// Remove leftover `.tmp` files from `atomic_write` that survived
+    /// a crash or force-kill. Each v5 directory is scanned for files
+    /// ending in `.tmp`; matches are deleted silently. This is safe
+    /// because `atomic_write` writes to `<target>.tmp` then renames
+    /// to `<target>` — a leftover `.tmp` is always a partial write
+    /// that never became the real file.
+    pub fn cleanup_tmp_files(&self) {
+        let dirs = [&self.root, &self.entries_dir, &self.internal, &self.histories_dir];
+        for dir in dirs {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map(|e| e == "tmp").unwrap_or(false) && path.is_file() {
+                        log::info!("removing leftover tmp file: {}", path.display());
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn create_dir_all(path: &Path) -> Result<(), StorageError> {

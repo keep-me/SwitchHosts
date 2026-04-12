@@ -56,6 +56,7 @@ impl AppState {
     pub fn bootstrap() -> Result<Self, StorageError> {
         let paths = V5Paths::resolve_default()?;
         paths.ensure_dirs()?;
+        paths.cleanup_tmp_files();
 
         let outcome = crate::migration::run_if_needed(&paths)?;
         log::info!("migration outcome: {outcome:?}");
