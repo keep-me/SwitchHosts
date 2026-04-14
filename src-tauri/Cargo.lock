@@ -4342,6 +4342,7 @@ dependencies = [
  "axum",
  "chrono",
  "dirs 5.0.1",
+ "libc",
  "log",
  "open",
  "regex",

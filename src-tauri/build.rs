@@ -16,5 +16,8 @@ fn main() {
     println!("cargo:rustc-env=SWH_VERSION={version}");
     println!("cargo:rustc-env=SWH_VERSION_LABEL=v{version}");
 
+    #[cfg(target_os = "macos")]
+    println!("cargo:rustc-link-lib=framework=Security");
+
     tauri_build::build()
 }

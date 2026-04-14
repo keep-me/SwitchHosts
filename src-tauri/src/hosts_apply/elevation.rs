@@ -16,11 +16,10 @@
 //! code on the Tauri path; it stays for the Electron build.
 //!
 //! Per-platform helpers:
-//! - macOS: `osascript -e 'do shell script ... with administrator
-//!   privileges'` (P2.E.2)
+//! - macOS: Security.framework `AuthorizationExecuteWithPrivileges`
+//!   with a process-lifetime cached `AuthorizationRef` (single prompt)
 //! - Linux: `pkexec /bin/cp` (P2.E.4)
-//! - Windows: `ShellExecuteExW` with `runas` verb on `cmd.exe /c
-//!   copy /Y` (P2.E.4)
+//! - Windows: `ShellExecuteExW` with `runas` verb (self-relaunch)
 
 use std::path::{Path, PathBuf};
 
@@ -48,60 +47,334 @@ fn stage_temp_file(content: &str) -> Result<PathBuf, HostsApplyError> {
     Ok(path)
 }
 
-// ---- macOS: osascript --------------------------------------------------------
+// ---- macOS: Security.framework with cached authorization --------------------
+//
+// Instead of spawning `osascript` on every write (which prompts for a
+// password each time), we use the Security.framework C API directly:
+//
+//   1. `AuthorizationCreate` obtains an `AuthorizationRef` and shows
+//      the OS password dialog on first call.
+//   2. The ref is cached in a process-global static so subsequent
+//      writes reuse it without re-prompting.
+//   3. `AuthorizationExecuteWithPrivileges` runs `/bin/cp` and
+//      `/bin/chmod` as root using the cached ref.
+//   4. The ref is freed via `AuthorizationFree` on `Drop` (app exit).
+//
+// `AuthorizationExecuteWithPrivileges` has been deprecated since macOS
+// 10.7 but remains functional through macOS 15 (Sequoia). Apple's
+// recommended replacement (`SMJobBless` / `SMAppService`) requires a
+// separate privileged helper daemon — massive overhead for copying one
+// file. Homebrew, Sparkle, and other major macOS tools still use AEWP.
+
+#[cfg(target_os = "macos")]
+mod security_ffi {
+    use std::ffi::c_void;
+
+    pub type AuthorizationRef = *mut c_void;
+    pub type OSStatus = i32;
+
+    pub const ERR_AUTHORIZATION_SUCCESS: OSStatus = 0;
+    pub const ERR_AUTHORIZATION_CANCELED: OSStatus = -60006;
+    pub const ERR_AUTHORIZATION_INVALID_REF: OSStatus = -60002;
+    pub const ERR_AUTHORIZATION_DENIED: OSStatus = -60005;
+
+    pub const K_AUTH_FLAG_INTERACTION_ALLOWED: u32 = 1 << 0;
+    pub const K_AUTH_FLAG_EXTEND_RIGHTS: u32 = 1 << 1;
+    pub const K_AUTH_FLAG_PREAUTHORIZE: u32 = 1 << 4;
+
+    #[repr(C)]
+    pub struct AuthorizationItem {
+        pub name: *const u8,
+        pub value_length: usize,
+        pub value: *mut c_void,
+        pub flags: u32,
+    }
+
+    #[repr(C)]
+    pub struct AuthorizationRights {
+        pub count: u32,
+        pub items: *mut AuthorizationItem,
+    }
+
+    extern "C" {
+        pub fn AuthorizationCreate(
+            rights: *const AuthorizationRights,
+            environment: *const c_void,
+            flags: u32,
+            authorization: *mut AuthorizationRef,
+        ) -> OSStatus;
+
+        pub fn AuthorizationFree(
+            authorization: AuthorizationRef,
+            flags: u32,
+        ) -> OSStatus;
+
+        pub fn AuthorizationExecuteWithPrivileges(
+            authorization: AuthorizationRef,
+            path_to_tool: *const u8,
+            options: u32,
+            arguments: *const *const u8,
+            communications_pipe: *mut *mut c_void,
+        ) -> OSStatus;
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct CachedAuth(security_ffi::AuthorizationRef);
+
+// SAFETY: AuthorizationRef is a process-scoped opaque pointer. The
+// Security.framework serialises access internally, so it is safe to
+// send across threads.
+#[cfg(target_os = "macos")]
+unsafe impl Send for CachedAuth {}
+
+#[cfg(target_os = "macos")]
+impl Drop for CachedAuth {
+    fn drop(&mut self) {
+        unsafe {
+            security_ffi::AuthorizationFree(self.0, 0);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+static CACHED_AUTH: std::sync::Mutex<Option<CachedAuth>> = std::sync::Mutex::new(None);
+
+/// Serialises `elevate_copy` calls so that only one thread at a time
+/// can use (or invalidate) the cached `AuthorizationRef`. Without
+/// this, a concurrent caller could hold a raw `AuthorizationRef`
+/// pointer while another thread frees it via `invalidate_cached_auth`.
+#[cfg(target_os = "macos")]
+static ELEVATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Obtain a cached `AuthorizationRef`, creating one (with an OS
+/// password prompt) on first call.
+#[cfg(target_os = "macos")]
+fn get_or_create_auth() -> Result<security_ffi::AuthorizationRef, HostsApplyError> {
+    let mut guard = CACHED_AUTH.lock().expect("auth mutex poisoned");
+
+    if let Some(ref cached) = *guard {
+        return Ok(cached.0);
+    }
+
+    let right_name = b"system.privilege.admin\0";
+    let mut item = security_ffi::AuthorizationItem {
+        name: right_name.as_ptr(),
+        value_length: 0,
+        value: std::ptr::null_mut(),
+        flags: 0,
+    };
+    let mut rights = security_ffi::AuthorizationRights {
+        count: 1,
+        items: &mut item,
+    };
+
+    let flags = security_ffi::K_AUTH_FLAG_INTERACTION_ALLOWED
+        | security_ffi::K_AUTH_FLAG_EXTEND_RIGHTS
+        | security_ffi::K_AUTH_FLAG_PREAUTHORIZE;
+
+    let mut auth_ref: security_ffi::AuthorizationRef = std::ptr::null_mut();
+    let status = unsafe {
+        security_ffi::AuthorizationCreate(
+            &mut rights,
+            std::ptr::null(),
+            flags,
+            &mut auth_ref,
+        )
+    };
+
+    match status {
+        security_ffi::ERR_AUTHORIZATION_SUCCESS => {
+            *guard = Some(CachedAuth(auth_ref));
+            Ok(auth_ref)
+        }
+        security_ffi::ERR_AUTHORIZATION_CANCELED => Err(HostsApplyError::Cancelled),
+        other => Err(HostsApplyError::Io {
+            message: format!("AuthorizationCreate failed: OSStatus {other}"),
+        }),
+    }
+}
+
+/// Clear the cached authorization so the next call to
+/// `get_or_create_auth` will prompt again.
+#[cfg(target_os = "macos")]
+fn invalidate_cached_auth() {
+    let mut guard = CACHED_AUTH.lock().expect("auth mutex poisoned");
+    *guard = None; // Drop calls AuthorizationFree
+}
+
+/// Internal error for the macOS elevation path. Carries the raw
+/// `OSStatus` when `AuthorizationExecuteWithPrivileges` fails, so
+/// the retry logic in `elevate_copy` can match on the numeric code
+/// instead of parsing error message strings.
+#[cfg(target_os = "macos")]
+enum MacElevateError {
+    /// AEWP returned a non-zero OSStatus.
+    AuthExec(security_ffi::OSStatus, String),
+    /// Everything else (I/O, encoding, child exit code).
+    Other(HostsApplyError),
+}
+
+#[cfg(target_os = "macos")]
+impl From<HostsApplyError> for MacElevateError {
+    fn from(e: HostsApplyError) -> Self {
+        MacElevateError::Other(e)
+    }
+}
+
+/// Execute `/bin/cp src dst && /bin/chmod 644 dst` as root using a
+/// previously obtained `AuthorizationRef`.
+#[cfg(target_os = "macos")]
+fn execute_privileged_copy(
+    auth_ref: security_ffi::AuthorizationRef,
+    src: &Path,
+    dst: &Path,
+) -> Result<(), MacElevateError> {
+    let src_cstr = std::ffi::CString::new(src.to_str().ok_or_else(|| HostsApplyError::Io {
+        message: "src path is not valid UTF-8".into(),
+    })?)
+    .map_err(|e| HostsApplyError::Io {
+        message: format!("CString from src: {e}"),
+    })?;
+    let dst_cstr = std::ffi::CString::new(dst.to_str().ok_or_else(|| HostsApplyError::Io {
+        message: "dst path is not valid UTF-8".into(),
+    })?)
+    .map_err(|e| HostsApplyError::Io {
+        message: format!("CString from dst: {e}"),
+    })?;
+
+    // --- /bin/cp src dst ---
+    let cp_args: [*const u8; 3] = [
+        src_cstr.as_ptr() as *const u8,
+        dst_cstr.as_ptr() as *const u8,
+        std::ptr::null(),
+    ];
+
+    let exit = unsafe {
+        run_privileged(auth_ref, b"/bin/cp\0".as_ptr(), cp_args.as_ptr())
+    }?;
+    if exit != 0 {
+        return Err(HostsApplyError::Io {
+            message: format!("/bin/cp exited with status {exit}"),
+        }.into());
+    }
+
+    // --- /bin/chmod 644 dst ---
+    let chmod_args: [*const u8; 3] = [
+        b"644\0".as_ptr(),
+        dst_cstr.as_ptr() as *const u8,
+        std::ptr::null(),
+    ];
+
+    let exit = unsafe {
+        run_privileged(auth_ref, b"/bin/chmod\0".as_ptr(), chmod_args.as_ptr())
+    }?;
+    if exit != 0 {
+        return Err(HostsApplyError::Io {
+            message: format!("/bin/chmod exited with status {exit}"),
+        }.into());
+    }
+
+    Ok(())
+}
+
+/// Run a tool via `AuthorizationExecuteWithPrivileges`, wait for the
+/// child to finish, and return its exit status.
+///
+/// Uses the `communicationsPipe` (child's stdout) to drain output
+/// until EOF before calling `wait()`. This ensures we reap the child
+/// that AEWP just spawned, not an unrelated child process.
+#[cfg(target_os = "macos")]
+unsafe fn run_privileged(
+    auth_ref: security_ffi::AuthorizationRef,
+    tool: *const u8,
+    args: *const *const u8,
+) -> Result<i32, MacElevateError> {
+    let mut pipe: *mut libc::FILE = std::ptr::null_mut();
+
+    let status = security_ffi::AuthorizationExecuteWithPrivileges(
+        auth_ref,
+        tool,
+        0,
+        args,
+        &mut pipe as *mut *mut libc::FILE as *mut *mut std::ffi::c_void,
+    );
+    if status != security_ffi::ERR_AUTHORIZATION_SUCCESS {
+        let tool_name = std::ffi::CStr::from_ptr(tool as *const i8)
+            .to_string_lossy();
+        return Err(MacElevateError::AuthExec(
+            status,
+            format!("AEWP({tool_name}): OSStatus {status}"),
+        ));
+    }
+
+    // Drain the pipe until EOF — this blocks until the child exits,
+    // guaranteeing the subsequent wait() reaps the correct process.
+    if !pipe.is_null() {
+        let mut buf = [0u8; 256];
+        while libc::fread(
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            1,
+            buf.len(),
+            pipe,
+        ) > 0
+        {}
+        libc::fclose(pipe);
+    }
+
+    let mut wstatus: i32 = 0;
+    let pid = libc::wait(&mut wstatus);
+    if pid < 0 {
+        return Ok(-1);
+    }
+    if libc::WIFEXITED(wstatus) {
+        Ok(libc::WEXITSTATUS(wstatus))
+    } else {
+        Ok(-1)
+    }
+}
 
 #[cfg(target_os = "macos")]
 fn elevate_copy(src: &Path, dst: &Path) -> Result<(), HostsApplyError> {
-    use std::process::Command;
+    // Serialise all elevation attempts so that no thread can free a
+    // cached AuthorizationRef while another thread is still using it.
+    let _lock = ELEVATE_LOCK.lock().expect("elevate lock poisoned");
 
-    // We pass both paths through `quoted form of` so spaces and other
-    // shell metacharacters in the temp dir don't break the inner shell
-    // script. The outer AppleScript still needs its own backslash
-    // escaping for embedded double-quotes — the temp filename only
-    // contains hex digits and underscores, so the risk is theoretical
-    // but the escape pass keeps the contract honest.
-    let src_lit = applescript_string_literal(&src.display().to_string());
-    let dst_lit = applescript_string_literal(&dst.display().to_string());
+    let auth_ref = get_or_create_auth()?;
 
-    let script = format!(
-        "do shell script \"/bin/cp \" & quoted form of {src_lit} & \" \" & quoted form of {dst_lit} & \" && /bin/chmod 644 \" & quoted form of {dst_lit} with administrator privileges"
-    );
-
-    let output = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(&script)
-        .output()
-        .map_err(|e| HostsApplyError::Io {
-            message: format!("failed to launch osascript: {e}"),
-        })?;
-
-    if output.status.success() {
-        return Ok(());
+    match execute_privileged_copy(auth_ref, src, dst) {
+        Ok(()) => Ok(()),
+        Err(MacElevateError::AuthExec(status, msg))
+            if is_auth_stale(status) =>
+        {
+            // Cached authorization was invalidated (timeout, revocation).
+            // Clear it and retry once — the retry will re-prompt the user.
+            log::info!("{msg} — re-prompting");
+            invalidate_cached_auth();
+            let auth_ref = get_or_create_auth()?;
+            execute_privileged_copy(auth_ref, src, dst)
+                .map_err(mac_elevate_to_hosts_error)
+        }
+        Err(e) => Err(mac_elevate_to_hosts_error(e)),
     }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    if is_user_cancelled(&stderr) {
-        return Err(HostsApplyError::Cancelled);
-    }
-    Err(HostsApplyError::Io {
-        message: format!("osascript exit {}: {}", output.status, stderr.trim()),
-    })
 }
 
 #[cfg(target_os = "macos")]
-fn applescript_string_literal(s: &str) -> String {
-    // AppleScript string literal: wrap in double quotes, escape `"` and
-    // `\`. The shell quoting is handled separately by `quoted form of`.
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+fn mac_elevate_to_hosts_error(e: MacElevateError) -> HostsApplyError {
+    match e {
+        MacElevateError::AuthExec(_, msg) => HostsApplyError::Io { message: msg },
+        MacElevateError::Other(e) => e,
+    }
 }
 
+/// Returns `true` when the OSStatus indicates the cached
+/// `AuthorizationRef` is no longer valid and a new one should be
+/// obtained (errAuthorizationInvalidRef or errAuthorizationDenied
+/// which can occur on timeout).
 #[cfg(target_os = "macos")]
-fn is_user_cancelled(stderr: &str) -> bool {
-    // osascript reports user cancellation as `(-128)` regardless of
-    // locale. The textual `User canceled.` follows the localized
-    // system, so checking the numeric code is the reliable signal.
-    stderr.contains("(-128)") || stderr.contains("User canceled") || stderr.contains("User cancelled")
+fn is_auth_stale(status: security_ffi::OSStatus) -> bool {
+    status == security_ffi::ERR_AUTHORIZATION_INVALID_REF
+        || status == security_ffi::ERR_AUTHORIZATION_DENIED
 }
 
 // ---- Linux: pkexec ---------------------------------------------------------

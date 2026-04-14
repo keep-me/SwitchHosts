@@ -32,6 +32,9 @@ regex = "1"
 open = "5"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "json"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.60", features = [
     "Win32_UI_Shell",
