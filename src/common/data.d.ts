@@ -25,6 +25,9 @@ export interface IHostsListObject {
 
   is_sys?: boolean
 
+  // 分组颜色标记
+  color?: string
+
   [key: string]: any
 }
 

@@ -55,6 +55,8 @@ export default {
   front: 'Front',
   general: 'General',
   group: 'Group',
+  group_color: 'Group Color',
+  select_color: 'Select Color',
   help: 'Help',
   hide: 'Hide',
   hide_at_launch: 'Hide at launch',

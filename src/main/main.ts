@@ -4,11 +4,13 @@
  * @homepage https://oldj.net
  */
 
+import version from '@/version.json'
 import { configAll, configGet } from '@main/actions'
 import '@main/core/agent'
 import * as message from '@main/core/message'
 import '@main/core/popupMenu'
 import '@main/data'
+import { getSwhDb } from '@main/data'
 import * as http_api from '@main/http'
 import * as cron from '@main/libs/cron'
 import getIndex from '@main/libs/getIndex'
@@ -18,12 +20,10 @@ import checkSystemLocale from '@main/ui/checkSystemLocale'
 import * as find from '@main/ui/find'
 import { makeMainMenu } from '@main/ui/menu'
 import '@main/ui/tray'
-import version from '@/version.json'
 import { app, BrowserWindow, ipcMain, nativeTheme } from 'electron'
 import windowStateKeeper from 'electron-window-state'
 import * as path from 'path'
 import { v4 as uuid4 } from 'uuid'
-import { getSwhDb } from '@main/data'
 
 let win: BrowserWindow | null
 
@@ -167,7 +167,7 @@ app.on('ready', async () => {
   let http_api_on = await configGet('http_api_on')
   let http_api_only_local = await configGet('http_api_only_local')
   if (http_api_on) {
-    http_api.start(http_api_only_local)
+    await http_api.start(http_api_only_local)
   }
 
   find.makeWindow()

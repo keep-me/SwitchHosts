@@ -55,6 +55,8 @@ const lang: LanguageDict = {
   front: '前置',
   general: '一般',
   group: '群組',
+  group_color: '群組顏色',
+  select_color: '選擇顏色',
   help: 'Help',
   hide: '隱藏',
   hide_at_launch: '啟動時隱藏',

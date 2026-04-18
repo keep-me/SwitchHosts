@@ -14,7 +14,7 @@ import {
   Radio,
   SimpleGrid,
   Text,
-  TextInput,
+  TextInput
 } from '@mantine/core'
 import ItemIcon from '@renderer/components/ItemIcon'
 import SideDrawer from '@renderer/components/SideDrawer'
@@ -318,6 +318,32 @@ const EditHostsInfo = () => {
             placeholder=""
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => onUpdate({ title: e.target.value })}
             onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => e.key === 'Enter' && onSave()}
+          />
+        </Box>
+
+        <Box className={styles.ln}>
+          <Text mb="8px">{lang.group_color}</Text>
+          <ColorInput
+            value={hosts?.color || ''}
+            onChange={(value) => onUpdate({ color: value || undefined })}
+            placeholder={lang.select_color}
+            format="hex"
+            swatches={[
+              '#2e2e2e',
+              '#868e96',
+              '#fa5252',
+              '#e64980',
+              '#be4bdb',
+              '#7950f2',
+              '#4c6ef5',
+              '#228be6',
+              '#15aabf',
+              '#12b886',
+              '#40c057',
+              '#82c91e',
+              '#fab005',
+              '#fd7e14',
+            ]}
           />
         </Box>
 

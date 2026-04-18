@@ -160,6 +160,12 @@ const ListItem = (props: Props) => {
       }}
     >
       <div className={styles.title} onClick={onSelect}>
+        {data.color && (
+          <span
+            className={styles.color_dot}
+            style={{ backgroundColor: data.color }}
+          />
+        )}
         <span className={clsx(styles.icon, is_folder && styles.folder)} onClick={toggleIsCollapsed}>
           <ItemIcon type={data.is_sys ? 'system' : data.type} is_collapsed={data.is_collapsed} />
         </span>
